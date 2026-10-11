@@ -10,6 +10,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { MediaType, AspectRatio, Duration } from "@/types";
+import { toSafeMediaUrl } from "@/lib/safe-url";
 
 interface GenerationResultProps {
   mediaUrl?: string | null;
@@ -55,6 +56,18 @@ export function GenerationResult({
 
   if (!mediaUrl) return null;
 
+  // SECURITY: Validate URL against the CDN allow-list before rendering.
+  // Prevents javascript: URLs and unauthorized external media sources.
+  const safeUrl = toSafeMediaUrl(mediaUrl);
+  if (!safeUrl) {
+    return (
+      <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700">
+        Media URL failed security validation.
+      </div>
+    );
+  }
+
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 10 }}
@@ -88,7 +101,7 @@ export function GenerationResult({
         </div>
 
         <button
-          onClick={() => window.open(mediaUrl, "_blank")}
+          onClick={() => window.open(safeUrl, "_blank", "noopener,noreferrer")}
           className="flex items-center space-x-1 text-slate-500 hover:text-slate-800 transition-colors text-xs cursor-pointer"
         >
           <ExternalLink className="w-3 h-3" />
@@ -101,7 +114,7 @@ export function GenerationResult({
         {mediaType === "video" && (
           <div className="w-full">
             <video
-              src={mediaUrl}
+              src={safeUrl}
               controls
               autoPlay
               loop
@@ -133,7 +146,7 @@ export function GenerationResult({
               )}
             </div>
 
-            <audio controls src={mediaUrl} className="w-full max-w-md shadow-xs" />
+            <audio controls src={safeUrl} className="w-full max-w-md shadow-xs" />
           </div>
         )}
 
@@ -141,13 +154,13 @@ export function GenerationResult({
           <div className="relative group w-full flex items-center justify-center">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src={mediaUrl}
+              src={safeUrl}
               alt="Generated Media"
               className="w-full max-h-[420px] object-contain"
             />
             <div className="absolute inset-0 bg-slate-900/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center backdrop-blur-xs">
               <button
-                onClick={() => window.open(mediaUrl, "_blank")}
+                onClick={() => window.open(safeUrl, "_blank", "noopener,noreferrer")}
                 className="flex items-center space-x-1.5 bg-white text-slate-800 px-4 py-2 rounded-lg shadow-md font-medium text-xs hover:bg-slate-50 cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5" />

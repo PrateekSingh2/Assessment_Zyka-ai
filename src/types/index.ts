@@ -16,7 +16,7 @@ export interface UpstreamErrorDetail {
   technicalMessage: string;
   upstreamService: string;
   traceId: string;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface SanitizedErrorDetail {
@@ -89,7 +89,8 @@ export interface ServerErrorLogEntry {
     | "x-forwarded-for"
     | "client-public-wan"
     | "system-lan-interface"
-    | "remote-addr-fallback";
+    | "remote-addr-fallback"
+    | "socket";
   userId: string; // Authenticated user ID or deterministic client fingerprint
   userAgent: string;
   requestId: string;

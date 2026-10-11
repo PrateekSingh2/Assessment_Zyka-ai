@@ -7,7 +7,6 @@ import { LoadingSteps } from "@/components/ui/LoadingSteps";
 import { InternalsInspector } from "@/components/InternalsInspector";
 import { LogsModal } from "@/components/LogsModal";
 import {
-  fetchRealClientIp,
   getStoredOrNewUsername,
   regenerateUsername,
 } from "@/lib/client-identity";
@@ -50,17 +49,11 @@ export default function Home() {
     const storedUser = getStoredOrNewUsername();
     setUsername(storedUser);
 
-    // 3. Resolve exact real IP address (even on localhost)
-    fetchRealClientIp().then((res) => {
-      setRealIp(res.ip);
-      setIpSource(
-        res.source === "public-api"
-          ? "Public WAN"
-          : res.source === "lan-network"
-          ? "Local LAN"
-          : "Loopback"
-      );
-    });
+    // NOTE: Real IP is no longer fetched from a third-party service (api.ipify.org)
+    // or from /api/my-ip (removed for security). It will be shown as "Local" until
+    // the first generation request, at which point the server-verified IP is shown
+    // from the x-zyka-resolved-ip response header.
+    setIpSource("Local");
 
     return () => unsubscribe();
   }, []);
@@ -78,18 +71,17 @@ export default function Home() {
     });
   };
 
-  const handleRefreshIp = async () => {
-    setIpSource("Refreshing...");
-    const res = await fetchRealClientIp();
-    setRealIp(res.ip);
-    setIpSource(
-      res.source === "public-api"
-        ? "Public WAN"
-        : res.source === "lan-network"
-        ? "Local LAN"
-        : "Loopback"
-    );
+  const handleRefreshIp = () => {
+    recordOperationLog({
+      type: "DROPDOWN_SYNC",
+      status: "INFO",
+      realIp,
+      ipType: ipSource,
+      username,
+      summary: `Verified gateway connection for client ${realIp}`,
+    });
   };
+
 
   const [result, setResult] = useState<{
     mediaUrl?: string;

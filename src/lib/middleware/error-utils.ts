@@ -20,7 +20,7 @@ export interface UpstreamErrorPayload {
     maxWordLimit?: number;
     detectedWordCount?: number;
     unsupportedFormat?: string;
-    [key: string]: any;
+    [key: string]: unknown;
   };
 }
 

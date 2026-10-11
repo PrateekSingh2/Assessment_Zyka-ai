@@ -18,7 +18,7 @@ export interface MockUpstreamResult {
     technicalMessage: string;
     upstreamService: string;
     traceId: string;
-    metadata?: Record<string, any>;
+    metadata?: Record<string, unknown>;
   };
 }
 
@@ -100,10 +100,12 @@ export async function executeMockUpstreamAI(params: {
   }
 
   // 4. Edge Case: Service Mismatch (Still Image requested while in Video tab)
+  // FIX: exclude "video game" compound noun from the video-keyword exclusion list
   const isAskingForStillImage =
     /\b(generate\s+(an?\s+)?(image|photo|picture|illustration|sketch|logo|portrait|avatar)|create\s+(an?\s+)?(image|still\s+image|photo|picture|wallpaper|drawing|illustration|sketch|logo|portrait|avatar)|still\s+(image|photo)|static\s+(image|photo)|high-res\s+wallpaper|photo\s+wallpaper)\b/i.test(
       trimmed
-    ) && !/\b(video|movie|animation|clip|motion|footage)\b/i.test(trimmed);
+    ) &&
+    !/\b(video(?!\s+game)\b|movie|animation|clip|motion|footage)\b/i.test(trimmed);
 
   if (normalizedType === "video" && isAskingForStillImage) {
     return {
@@ -124,8 +126,9 @@ export async function executeMockUpstreamAI(params: {
   }
 
   // 5. Edge Case: Service Mismatch (Video requested while in Image tab)
+  // FIX: exclude "video game" compound noun from triggering this check
   const isAskingForVideo =
-    /\b((?:generate|make|create)\s+(?:an?\s+)?(?:\d+[\s-]*(?:second|sec|s)\s+)?video|\b(?:\d+[\s-]*(?:second|sec|s)\s+)?video\b|video clip|animated clip|movie scene|flying over|motion clip|drone footage|camera pan|moving video)\b/i.test(
+    /\b((?:generate|make|create)\s+(?:an?\s+)?(?:\d+[\s-]*(?:second|sec|s)\s+)?video(?!\s+game)\b|\b(?:\d+[\s-]*(?:second|sec|s)\s+)?video(?!\s+game)\b|video clip|animated clip|movie scene|flying over|motion clip|drone footage|camera pan|moving video)\b/i.test(
       trimmed
     );
 
@@ -168,46 +171,59 @@ export async function executeMockUpstreamAI(params: {
     };
   }
 
-  // 7. Edge Case: Duration Limits & Dropdown Conflict (checked BEFORE aspect ratio to ensure correct error priority)
-  const durationMatch = trimmed.match(
-    /(\b\d+\b)[\s-]*(seconds?|secs?|minutes?|mins?|hours?|hrs?|s\b)/i
-  );
-  if (durationMatch) {
-    const val = parseInt(durationMatch[1], 10);
-    const unit = durationMatch[2].toLowerCase();
-    const isOver30s =
-      (unit.startsWith("sec") && val > 30) ||
-      unit.startsWith("min") ||
-      unit.startsWith("hr") ||
-      (unit === "s" && val > 30);
+  // 7. Edge Case: Duration Limits & Dropdown Conflict (checked BEFORE aspect ratio)
+  //
+  // FIX (false positives): negative lookbehind (?<!:) excludes clock-time
+  // contexts like "clock at 10:45" and matchAll evaluates ALL duration tokens.
+  const DURATION_RE = /(?<![:\d])(\d{1,3})\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?)(?!\w)/gi;
+  const BARE_SEC_RE = /(?<![:\d])(\d{1,3})s\b(?!ec)/gi;
+
+  const allDurationMatches = [
+    ...trimmed.matchAll(DURATION_RE),
+    ...trimmed.matchAll(BARE_SEC_RE),
+  ];
+
+  for (const m of allDurationMatches) {
+    const val = parseInt(m[1], 10);
+    const unitRaw = (m[2] ?? "s").toLowerCase();
+    const isMinuteOrHour =
+      unitRaw.startsWith("min") ||
+      unitRaw.startsWith("hr") ||
+      unitRaw.startsWith("hour");
+    const isSeconds = unitRaw.startsWith("sec") || unitRaw === "s";
+    const isOver30s = isMinuteOrHour || (isSeconds && val > 30);
 
     if (isOver30s) {
       return {
         status: 422,
         headers: {
           "x-upstream-error-code": "ERR_DURATION_OUT_OF_BOUNDS",
-          "x-upstream-raw-error": `[ERROR] VideoPipelineException: TemporalSequenceBoundsExceeded at temporal_encoder.cu:314.\nCode: 0x4D2 - Requested temporal render length (${val} ${unit}) exceeds hard upper-bound threshold (max: 30s).\nEngine: cuda_temporal_attention_v3 on node-tensor-compute-02\nTraceID: ${traceId}`,
+          "x-upstream-raw-error": `[ERROR] VideoPipelineException: TemporalSequenceBoundsExceeded.\nCode: 0x4D2 - Requested temporal render length exceeds hard upper-bound threshold (max: 30s).\nTraceID: ${traceId}`,
           "x-upstream-service": "Zyka-Temporal-Diffusion-Renderer",
           "x-upstream-trace-id": traceId,
         },
         error: {
           code: "ERR_DURATION_OUT_OF_BOUNDS",
-          technicalMessage: `[ERROR] VideoPipelineException: TemporalSequenceBoundsExceeded at temporal_encoder.cu:314.\nCode: 0x4D2 - Requested temporal render length (${val} ${unit}) exceeds hard upper-bound threshold (max: 30s).\nEngine: cuda_temporal_attention_v3 on node-tensor-compute-02\nTraceID: ${traceId}`,
+          technicalMessage: `[ERROR] VideoPipelineException: Requested duration exceeds max 30s.\nTraceID: ${traceId}`,
           upstreamService: "Zyka-Temporal-Diffusion-Renderer",
           traceId,
         },
       };
     }
 
-    // Subcase: Duration conflict with dropdown (e.g., prompt says 10s, but dropdown is 5s)
-    if (normalizedType === "video" && (unit.startsWith("sec") || unit === "s")) {
+    // Subcase: Duration conflict with dropdown (e.g., prompt says 10s but dropdown is 5s)
+    if (isSeconds && normalizedType === "video") {
       const promptDuration = `${val}s` as Duration;
-      if (["2s", "5s", "10s", "15s", "30s"].includes(promptDuration) && duration && promptDuration !== duration) {
+      if (
+        ["2s", "5s", "10s", "15s", "30s"].includes(promptDuration) &&
+        duration &&
+        promptDuration !== duration
+      ) {
         return {
           status: 422,
           headers: {
             "x-upstream-error-code": "ERR_DURATION_DROPDOWN_CONFLICT",
-            "x-upstream-raw-error": `[ERROR] VideoPipelineException: TemporalBudgetMismatch: Ingress duration header '${duration}' does not match prompt semantic duration '${promptDuration}'. Frame sequence cannot resolve.\nTraceID: ${traceId}`,
+            "x-upstream-raw-error": `[ERROR] TemporalBudgetMismatch: header '${duration}' vs prompt '${promptDuration}'.\nTraceID: ${traceId}`,
             "x-upstream-service": "Zyka-Temporal-Diffusion-Renderer",
             "x-upstream-trace-id": traceId,
             "x-conflicting-prompt-duration": promptDuration,
@@ -215,7 +231,7 @@ export async function executeMockUpstreamAI(params: {
           },
           error: {
             code: "ERR_DURATION_DROPDOWN_CONFLICT",
-            technicalMessage: `[ERROR] VideoPipelineException: TemporalBudgetMismatch: Ingress duration header '${duration}' does not match prompt semantic duration '${promptDuration}'. Frame sequence cannot resolve.\nTraceID: ${traceId}`,
+            technicalMessage: `[ERROR] TemporalBudgetMismatch: header '${duration}' vs prompt '${promptDuration}'.\nTraceID: ${traceId}`,
             upstreamService: "Zyka-Temporal-Diffusion-Renderer",
             traceId,
             metadata: {
@@ -228,9 +244,38 @@ export async function executeMockUpstreamAI(params: {
     }
   }
 
+
+
   // 8. Edge Case: Generic Aspect Ratio Detection & Mismatch in Prompt (e.g. 17:8, 2:1, 32:9)
   const supportedRatios: AspectRatio[] = ["16:9", "9:16", "1:1", "4:3", "21:9"];
-  const ratioMatch = trimmed.match(/\b(\d+:\d+)\b|circular ratio/i);
+
+  // FIX (false positive): "clock showing 10:45" must NOT match as an aspect ratio.
+  // Strategy: only match X:Y if it is preceded (within 30 chars) by an aspect-ratio
+  // context keyword, OR if it exactly matches a known supported ratio.
+  // Anchored at word boundaries, max 4 digits each side to exclude port numbers.
+  const RATIO_CONTEXT_RE = /(?:aspect\s+ratio|ratio|widescreen|letterbox|portrait\s+mode|landscape\s+mode)\s*[:\-]?\s*(\d{1,4}:\d{1,4})/i;
+  const KNOWN_RATIO_RE = /\b(16:9|9:16|1:1|4:3|21:9)\b/i;
+  const ANY_RATIO_RE = /\b(\d{1,4}:\d{1,4})\b/gi;
+
+  // First check for contextual aspect ratio mentions
+  const contextMatch = RATIO_CONTEXT_RE.exec(trimmed) ?? KNOWN_RATIO_RE.exec(trimmed);
+  // Then check for any bare X:Y pattern (only valid as ratio if it looks like one)
+  // Exclude: time patterns like HH:MM (hours 0-23, minutes 0-59)
+  let ratioMatch: RegExpExecArray | null = null;
+  if (contextMatch) {
+    ratioMatch = contextMatch;
+  } else {
+    for (const m of trimmed.matchAll(ANY_RATIO_RE)) {
+      const [a, b] = m[1].split(":").map(Number);
+      // Exclude time-like values (HH:MM format) — hours 0-23, minutes 0-59
+      const looksLikeTime = a >= 0 && a <= 23 && b >= 0 && b <= 59;
+      if (!looksLikeTime) {
+        ratioMatch = m as unknown as RegExpExecArray;
+        break;
+      }
+    }
+  }
+
 
   if (ratioMatch && normalizedType !== "voice") {
     const extractedRatio = ratioMatch[1] || ratioMatch[0];

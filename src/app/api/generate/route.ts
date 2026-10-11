@@ -1,97 +1,158 @@
+/**
+ * POST /api/generate — AI media generation route handler.
+ *
+ * SECURITY CHANGES over original:
+ * 1. Body is read through readBoundedJson() with a 16 KB hard cap before
+ *    JSON.parse — prevents OOM DoS from multi-MB prompts.
+ * 2. All body fields validated with GenerateBody Zod schema — eliminates
+ *    blind type casts, `any`, and header injection via model/quality.
+ * 3. IP and userId are read from proxy-injected x-zyka-resolved-* headers
+ *    (set by proxy.ts after zero-trust resolution) — never from client input.
+ * 4. Error responses no longer include rawError, serverLog internals,
+ *    debug.requestHeaders, or stack traces — only traceId + sanitized message.
+ * 5. catch (e: unknown) instead of catch (e: any).
+ * 6. SyntaxError body → 400, schema failure → 422, PayloadTooLarge → 413.
+ * 7. sanitizeHeaderValue applied to ALL response header values, not just errors.
+ */
+
 import { NextRequest, NextResponse } from "next/server";
 import { executeMockUpstreamAI } from "@/lib/mock-upstream";
-import { interceptAndTranslateUpstreamError, generateSecureTraceId } from "@/lib/middleware/error-interceptor";
-import { MediaType, AspectRatio, Duration } from "@/types";
 import {
-  recordServerError,
-  extractRealClientIp,
-  resolveUserIdentifier,
-} from "@/lib/server-logger";
+  interceptAndTranslateUpstreamError,
+  generateSecureTraceId,
+  sanitizeHeaderValue,
+} from "@/lib/middleware/error-interceptor";
+import {
+  readBoundedJson,
+  GenerateBody,
+  PayloadTooLargeError,
+  MalformedJsonError,
+} from "@/lib/request-schema";
+import { recordServerError } from "@/lib/server-logger";
+import type { ServerErrorLogEntry } from "@/types";
 
-export async function POST(req: NextRequest) {
+// ---------------------------------------------------------------------------
+// Helper: extract the server-resolved (trusted) identity from proxy headers
+// ---------------------------------------------------------------------------
+function getResolvedIdentity(req: NextRequest): {
+  resolvedIp: string;
+  ipSource: ServerErrorLogEntry["ipSource"];
+  resolvedUserId: string;
+  userAgent: string;
+} {
+  // These headers are set by proxy.ts after zero-trust resolution.
+  // They were stripped from client input before proxy ran, so they are safe.
+  const resolvedIp =
+    req.headers.get("x-zyka-resolved-ip") ?? "127.0.0.1";
+  const ipSource =
+    (req.headers.get("x-zyka-resolved-ip-source") as ServerErrorLogEntry["ipSource"]) ??
+    "remote-addr-fallback";
+  const resolvedUserId =
+    req.headers.get("x-zyka-resolved-user-id") ?? "usr_anon_unknown";
+  const userAgent = req.headers.get("user-agent") ?? "unknown-client";
+  return { resolvedIp, ipSource, resolvedUserId, userAgent };
+}
+
+// ---------------------------------------------------------------------------
+// Helper: minimal, non-leaking public error response body
+// ---------------------------------------------------------------------------
+function publicErrorBody(
+  statusCode: number,
+  traceId: string,
+  userMessage: string,
+  actionableTip: string,
+  category: string,
+  // Optional UI-actionable extras (safe, schema-validated values only)
+  extras?: {
+    suggestedService?: string;
+    suggestedRatio?: string;
+    suggestedDuration?: string;
+    actionLabel?: string;
+  }
+) {
+  return {
+    success: false as const,
+    statusCode,
+    traceId,
+    sanitizedError: {
+      userMessage,
+      category,
+      actionableTip,
+      ...extras,
+    },
+  };
+}
+
+export async function POST(req: NextRequest): Promise<NextResponse> {
+  const traceId = generateSecureTraceId();
+  const identity = getResolvedIdentity(req);
+
   try {
-    // 1. Capture Ingress Request Headers
-    const requestHeadersRecord: Record<string, string> = {};
-    req.headers.forEach((val, key) => {
-      requestHeadersRecord[key] = val;
-    });
-
-    // 2. Parse request payload
-    let body: any = {};
+    // ------------------------------------------------------------------
+    // 1. Bounded body read (throws PayloadTooLargeError / MalformedJsonError)
+    // ------------------------------------------------------------------
+    let rawBody: unknown;
     try {
-      body = await req.json();
-    } catch {
-      body = {};
+      rawBody = await readBoundedJson(req);
+    } catch (e: unknown) {
+      if (e instanceof PayloadTooLargeError) {
+        recordServerError({
+          ...identity,
+          statusCode: 413,
+          errorCode: "ERR_PAYLOAD_TOO_LARGE",
+          category: "VALIDATION",
+          rawTechnicalMessage: "Request body exceeded 16 KB limit",
+          sanitizedUserMessage: "Your request is too large. Please shorten your prompt.",
+          actionableTip: "Keep your prompt under 8,000 characters.",
+          route: "/api/generate",
+          method: "POST",
+          traceId,
+        });
+        return NextResponse.json(
+          publicErrorBody(413, traceId, "Your request is too large. Please shorten your prompt.", "Keep your prompt under 8,000 characters.", "VALIDATION"),
+          { status: 413 }
+        );
+      }
+      if (e instanceof MalformedJsonError) {
+        return NextResponse.json(
+          publicErrorBody(400, traceId, "Invalid JSON body.", "Send a valid JSON object with a prompt field.", "VALIDATION"),
+          { status: 400 }
+        );
+      }
+      throw e; // Re-throw unexpected errors to outer catch
     }
 
-    // Use nullish coalescing so falsy values like 0, false are preserved as strings
-    const rawPrompt = body.prompt ?? "";
-    const prompt = typeof rawPrompt === "string" ? rawPrompt : String(rawPrompt);
-
-    // Normalize and validate mediaType — must be a valid string MediaType
-    const rawMediaType = body.mediaType ?? req.headers.get("x-zyka-media-type") ?? "image";
-    const mediaTypeStr = typeof rawMediaType === "string" ? rawMediaType.toLowerCase() : String(rawMediaType);
-    const validMediaTypes = ["image", "video", "audio", "voice"];
-
-    if (!validMediaTypes.includes(mediaTypeStr)) {
-      const traceId = generateSecureTraceId();
-      const technicalMsg = `[ERROR] HeaderValidationException: 'mediaType' body field value '${mediaTypeStr}' is not in valid media type registry. Code: 0x7E1 - Supported values are: [image, video, voice, audio]. TraceID: ${traceId}`;
-      const fallbackHeaders = {
-        "x-upstream-error-code": "ERR_UNSUPPORTED_MEDIA_TYPE",
-        "x-upstream-raw-error": technicalMsg,
-        "x-upstream-service": "Zyka-Route-Handler-Boundary",
-        "x-upstream-trace-id": traceId,
-      };
-      const translated = interceptAndTranslateUpstreamError(415, fallbackHeaders);
-
-      const serverLog = recordServerError({
-        headers: req.headers,
-        statusCode: 415,
-        errorCode: "ERR_UNSUPPORTED_MEDIA_TYPE",
-        category: "FORMAT",
-        rawTechnicalMessage: technicalMsg,
-        sanitizedUserMessage: translated.sanitizedError.userMessage,
-        actionableTip: translated.sanitizedError.actionableTip,
-        upstreamService: "Zyka-Route-Handler-Boundary",
+    // ------------------------------------------------------------------
+    // 2. Zod schema validation — strict typing, no any, no blind casts
+    // ------------------------------------------------------------------
+    const parsed = GenerateBody.safeParse(rawBody);
+    if (!parsed.success) {
+      const firstIssue = parsed.error.issues[0];
+      const field = firstIssue?.path.join(".") ?? "input";
+      const detail = firstIssue?.message ?? "Validation failed";
+      recordServerError({
+        ...identity,
+        statusCode: 422,
+        errorCode: "ERR_SCHEMA_VALIDATION",
+        category: "VALIDATION",
+        rawTechnicalMessage: `Schema validation failed: ${parsed.error.message}`,
+        sanitizedUserMessage: `Invalid ${field}: ${detail}`,
+        actionableTip: "Check your prompt and parameters.",
         route: "/api/generate",
         method: "POST",
         traceId,
       });
-
-      const responseHeaders = {
-        ...translated.responseHeaders,
-        "x-zyka-real-ip": serverLog.clientIp,
-        "x-zyka-ip-source": serverLog.ipSource,
-        "x-zyka-user-id": serverLog.userId,
-      };
-
       return NextResponse.json(
-        {
-          success: false,
-          statusCode: 415,
-          rawError: translated.rawError,
-          sanitizedError: translated.sanitizedError,
-          serverLog,
-          debug: { requestHeaders: requestHeadersRecord, responseHeaders },
-        },
-        { status: 415, headers: responseHeaders }
+        publicErrorBody(422, traceId, `Invalid ${field}: ${detail}`, "Check your prompt and parameters.", "VALIDATION"),
+        { status: 422 }
       );
     }
 
-    const mediaType: MediaType = mediaTypeStr as MediaType;
-    const duration: Duration | undefined =
-      body.duration ||
-      (req.headers.get("x-zyka-duration") as Duration) ||
-      undefined;
-    const aspectRatio: AspectRatio | undefined =
-      body.aspectRatio ||
-      (req.headers.get("x-zyka-aspect-ratio") as AspectRatio) ||
-      undefined;
+    const { prompt, mediaType, duration, aspectRatio, model, quality } = parsed.data;
 
-    const model = body.model || "Auto (Best model)";
-    const quality = body.quality || "High Quality";
-
-    // 3. Dispatch to Mock Upstream AI Engine
+    // ------------------------------------------------------------------
+    // 3. Dispatch to mock upstream AI engine
+    // ------------------------------------------------------------------
     const upstreamResult = await executeMockUpstreamAI({
       prompt,
       mediaType,
@@ -99,10 +160,13 @@ export async function POST(req: NextRequest) {
       aspectRatio,
       model,
       quality,
-      requestHeaders: requestHeadersRecord,
+      // Never pass raw request headers to upstream — only safe derived values
+      requestHeaders: {},
     });
 
-    // 4. Intercept errors using Middleware Error Interceptor
+    // ------------------------------------------------------------------
+    // 4. Translate upstream errors through the error interceptor
+    // ------------------------------------------------------------------
     if (upstreamResult.status >= 400 || upstreamResult.error) {
       const translated = interceptAndTranslateUpstreamError(
         upstreamResult.status,
@@ -110,12 +174,12 @@ export async function POST(req: NextRequest) {
         upstreamResult.error
       );
 
-      // Record Server-Level Error Log with Real Client IP and User Identity
-      const serverLog = recordServerError({
-        headers: req.headers,
+      recordServerError({
+        ...identity,
         statusCode: translated.statusCode,
         errorCode: translated.rawError.code,
         category: translated.sanitizedError.category,
+        // rawTechnicalMessage is stored SERVER-SIDE ONLY in the log
         rawTechnicalMessage: translated.rawError.technicalMessage,
         sanitizedUserMessage: translated.sanitizedError.userMessage,
         actionableTip: translated.sanitizedError.actionableTip,
@@ -123,123 +187,104 @@ export async function POST(req: NextRequest) {
         route: "/api/generate",
         method: "POST",
         traceId: translated.rawError.traceId,
-        payload: {
-          prompt,
-          mediaType,
-          duration,
-          aspectRatio,
-          model,
-        },
+        payload: { prompt, mediaType, duration, aspectRatio, model },
       });
 
-      const responseHeaders = {
-        ...translated.responseHeaders,
-        "x-zyka-real-ip": serverLog.clientIp,
-        "x-zyka-ip-source": serverLog.ipSource,
-        "x-zyka-user-id": serverLog.userId,
-      };
-
+      // Return ONLY sanitized, client-safe information
       return NextResponse.json(
-        {
-          success: false,
-          statusCode: translated.statusCode,
-          rawError: translated.rawError,
-          sanitizedError: translated.sanitizedError,
-          serverLog,
-          debug: {
-            requestHeaders: requestHeadersRecord,
-            responseHeaders,
-          },
-        },
+        publicErrorBody(
+          translated.statusCode,
+          translated.rawError.traceId,
+          translated.sanitizedError.userMessage,
+          translated.sanitizedError.actionableTip,
+          translated.sanitizedError.category,
+          {
+            suggestedService: translated.sanitizedError.suggestedService,
+            suggestedRatio: translated.sanitizedError.suggestedRatio,
+            suggestedDuration: translated.sanitizedError.suggestedDuration,
+            actionLabel: translated.sanitizedError.actionLabel,
+          }
+        ),
         {
           status: translated.statusCode,
-          headers: responseHeaders,
+          headers: translated.responseHeaders,
         }
       );
     }
 
-    // 5. Successful Response with telemetry headers
-    const { ip: realClientIp, source: ipSource } = extractRealClientIp(req.headers);
-    const userAgent = req.headers.get("user-agent") || "unknown-client";
-    const resolvedUserId = resolveUserIdentifier(req.headers, realClientIp, userAgent);
-
-    const enrichedSuccessHeaders: Record<string, string> = {
-      ...upstreamResult.headers,
+    // ------------------------------------------------------------------
+    // 5. Successful response — sanitize all header values before sending
+    // ------------------------------------------------------------------
+    const successHeaders: Record<string, string> = {
       "x-zyka-status": "SUCCESS",
-      "x-zyka-sanitized-error": "none",
-      "x-zyka-media-type": mediaType,
-      "x-zyka-real-ip": realClientIp,
-      "x-zyka-ip-source": ipSource,
-      "x-zyka-user-id": resolvedUserId,
+      "x-zyka-media-type": sanitizeHeaderValue(mediaType),
       "x-zyka-completed-at": new Date().toISOString(),
+      "x-zyka-trace-id": sanitizeHeaderValue(traceId),
     };
+
+    // Forward allowed upstream headers with sanitization applied
+    const SAFE_SUCCESS_UPSTREAM_HEADERS = new Set([
+      "x-upstream-status",
+      "x-upstream-service",
+      "x-upstream-trace-id",
+      "x-model-used",
+      "x-quality-profile",
+    ]);
+    for (const [k, v] of Object.entries(upstreamResult.headers)) {
+      if (SAFE_SUCCESS_UPSTREAM_HEADERS.has(k)) {
+        successHeaders[k] = sanitizeHeaderValue(v);
+      }
+    }
 
     return NextResponse.json(
       {
-        success: true,
+        success: true as const,
         statusCode: 200,
+        traceId,
         data: upstreamResult.data,
-        debug: {
-          requestHeaders: requestHeadersRecord,
-          responseHeaders: enrichedSuccessHeaders,
-        },
       },
-      {
-        status: 200,
-        headers: enrichedSuccessHeaders,
-      }
+      { status: 200, headers: successHeaders }
     );
-  } catch (unexpectedError: any) {
-    // Top-level crash handler
-    console.error("Unhandled Exception in Route Handler:", unexpectedError);
+  } catch (unexpectedError: unknown) {
+    // ------------------------------------------------------------------
+    // Top-level crash handler — log server-side, return opaque 500
+    // ------------------------------------------------------------------
+    const errorMessage =
+      unexpectedError instanceof Error
+        ? unexpectedError.message
+        : "Unknown fault";
 
-    const traceId = generateSecureTraceId();
-    const fallbackHeaders = {
-      "x-upstream-error-code": "ERR_INTERNAL_GATEWAY_FAULT",
-      "x-upstream-raw-error": `[CRITICAL] UnhandledServerException at route.ts:89\nError: ${unexpectedError?.message || "Unknown fault"}\nStack: ${unexpectedError?.stack?.split("\n").slice(0, 3).join("\n") || "No stack"}\nTraceID: ${traceId}`,
-      "x-upstream-service": "Zyka-Route-Handler-Boundary",
-      "x-upstream-trace-id": traceId,
-    };
+    // Log the full error server-side only — never send to client
+    console.error("[/api/generate] Unhandled exception:", errorMessage);
+    if (unexpectedError instanceof Error) {
+      console.error(unexpectedError.stack);
+    }
 
-    const translated = interceptAndTranslateUpstreamError(500, fallbackHeaders);
-
-    const serverLog = recordServerError({
-      headers: req.headers,
+    recordServerError({
+      ...identity,
       statusCode: 500,
       errorCode: "ERR_INTERNAL_GATEWAY_FAULT",
       category: "SYSTEM",
-      rawTechnicalMessage: fallbackHeaders["x-upstream-raw-error"],
-      sanitizedUserMessage: translated.sanitizedError.userMessage,
-      actionableTip: translated.sanitizedError.actionableTip,
+      rawTechnicalMessage: `Unhandled exception: ${errorMessage}`,
+      sanitizedUserMessage:
+        "An unexpected error occurred. Please try again in a moment.",
+      actionableTip: "If the problem persists, please contact support with your trace ID.",
       upstreamService: "Zyka-Route-Handler-Boundary",
       route: "/api/generate",
       method: "POST",
       traceId,
     });
 
-    const responseHeaders = {
-      ...translated.responseHeaders,
-      "x-zyka-real-ip": serverLog.clientIp,
-      "x-zyka-ip-source": serverLog.ipSource,
-      "x-zyka-user-id": serverLog.userId,
-    };
-
+    // Return ONLY traceId so the user can report it — no stack, no internals
     return NextResponse.json(
-      {
-        success: false,
-        statusCode: 500,
-        rawError: translated.rawError,
-        sanitizedError: translated.sanitizedError,
-        serverLog,
-        debug: {
-          requestHeaders: {},
-          responseHeaders,
-        },
-      },
-      {
-        status: 500,
-        headers: responseHeaders,
-      }
+      publicErrorBody(
+        500,
+        traceId,
+        "An unexpected error occurred. Please try again in a moment.",
+        "If the problem persists, please contact support with your trace ID.",
+        "SYSTEM"
+      ),
+      { status: 500 }
     );
   }
 }
