@@ -1,9 +1,8 @@
 /**
  * ============================================================================
- * ZYKA AI — SERVER-LEVEL REAL IP & USER-WISE ERROR AUDIT TEST SUITE
- * Verifies real IP resolution (Cloudflare, Nginx, XFF), user-wise tracing,
- * persistent disk logging (logs/server-errors.log & server-errors.jsonl),
- * and the /api/logs audit query endpoint.
+ * ZYKA AI — SERVER-LEVEL REAL IP & ERROR AUDIT TEST SUITE
+ * Verifies zero-trust real IP resolution, stripping of client spoofing headers,
+ * protected /api/logs admin authorization, and persistent JSONL disk logging.
  * ============================================================================
  */
 
@@ -12,6 +11,7 @@ import path from "path";
 
 const PORT = process.env.PORT || process.argv[2] || "3000";
 const BASE_URL = `http://localhost:${PORT}`;
+const ADMIN_TOKEN = process.env.ADMIN_API_TOKEN || "zyka_enterprise_audit_token_test_32chars!";
 
 let passed = 0;
 let failed = 0;
@@ -28,20 +28,22 @@ function assert(condition, message) {
 
 async function main() {
   console.log(`\n========================================================================`);
-  console.log(`  ZYKA AI — SERVER-LEVEL REAL IP & USER-WISE AUDIT VERIFICATION`);
+  console.log(`  ZYKA AI — SERVER-LEVEL REAL IP & SECURITY AUDIT VERIFICATION`);
   console.log(`  Target: ${BASE_URL}`);
   console.log(`  Timestamp: ${new Date().toISOString()}`);
   console.log(`========================================================================\n`);
 
-  // TEST 1: X-Forwarded-For Multi-Hop Real IP Resolution
-  console.log(`[TEST 1] Multi-hop X-Forwarded-For Header (203.0.113.195, 10.0.0.1)`);
+  // TEST 1: Zero-Trust Resolution & Stripping of Client Spoofing Headers
+  console.log(`[TEST 1] Client Spoofing Header Stripping & Server Resolution`);
   const res1 = await fetch(`${BASE_URL}/api/generate`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "x-forwarded-for": "203.0.113.195, 10.0.0.1, 172.16.0.5",
-      "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CreatorStudio/1.0",
-      "x-zyka-request-id": "test-xff-1",
+      "cf-connecting-ip": "198.51.100.77",
+      "x-zyka-user-id": "spoofed_admin_user",
+      "x-zyka-real-ip": "1.2.3.4",
+      "user-agent": "CreatorStudioPro/3.0",
+      "x-zyka-request-id": "test-spoof-1",
     },
     body: JSON.stringify({
       prompt: "Create an image 17:8 of neon sunset",
@@ -54,126 +56,51 @@ async function main() {
   const h1 = Object.fromEntries(res1.headers.entries());
 
   assert(res1.status === 422, `Status is HTTP 422 Unprocessable Entity (got ${res1.status})`);
-  assert(h1["x-zyka-real-ip"] === "203.0.113.195", `Header x-zyka-real-ip is '203.0.113.195' (got ${h1["x-zyka-real-ip"]})`);
-  assert(h1["x-zyka-ip-source"] === "x-forwarded-for", `Header x-zyka-ip-source is 'x-forwarded-for' (got ${h1["x-zyka-ip-source"]})`);
-  assert(json1.serverLog?.clientIp === "203.0.113.195", `serverLog.clientIp matches real IP 203.0.113.195`);
-  assert(json1.serverLog?.ipSource === "x-forwarded-for", `serverLog.ipSource recorded as x-forwarded-for`);
-  assert(json1.serverLog?.userId.startsWith("usr_anon_"), `Anonymous user fingerprint created: ${json1.serverLog?.userId}`);
+  assert(h1["x-zyka-real-ip"] === undefined, `Spoofed x-zyka-real-ip is stripped from client response headers`);
+  assert(h1["x-zyka-resolved-ip"] !== undefined, `Authoritative x-zyka-resolved-ip header is present`);
+  assert(h1["x-zyka-resolved-user-id"] !== "spoofed_admin_user", `Spoofed x-zyka-user-id is ignored and replaced by anonymous fingerprint`);
+  assert(json1.serverLog === undefined, `Internal serverLog object is not leaked in client error JSON`);
 
-  // TEST 2: Cloudflare Connecting IP Priority
-  console.log(`\n[TEST 2] Cloudflare Connecting IP Header (cf-connecting-ip: 198.51.100.77)`);
-  const res2 = await fetch(`${BASE_URL}/api/generate`, {
-    method: "POST",
+  // TEST 2: Protected Admin Access Gate on /api/logs (Fail-Closed without Token)
+  console.log(`\n[TEST 2] Protected Admin Access Gate: GET /api/logs without token`);
+  const resUnauth = await fetch(`${BASE_URL}/api/logs`);
+  assert(resUnauth.status === 404, `Unauthenticated GET /api/logs returns HTTP 404 (got ${resUnauth.status})`);
+
+  // TEST 3: Method Protection on /api/logs (POST /api/logs returns 405 Method Not Allowed)
+  console.log(`\n[TEST 3] Method Protection on /api/logs`);
+  const resBadMethod = await fetch(`${BASE_URL}/api/logs`, { method: "POST" });
+  assert(resBadMethod.status === 405, `POST /api/logs rejected with HTTP 405 Method Not Allowed (got ${resBadMethod.status})`);
+
+  // TEST 4: Authorized Admin Access on /api/logs with Valid Bearer Token
+  console.log(`\n[TEST 4] Authorized Admin Access: GET /api/logs with Bearer token`);
+  const resAuth = await fetch(`${BASE_URL}/api/logs`, {
     headers: {
-      "Content-Type": "application/json",
-      "cf-connecting-ip": "198.51.100.77",
-      "x-forwarded-for": "10.0.0.99", // CF header must take precedence over XFF proxy hop
-      "user-agent": "ZykaAI-Client/2.4",
-      "x-zyka-request-id": "test-cf-2",
+      Authorization: `Bearer ${ADMIN_TOKEN}`,
     },
-    body: JSON.stringify({
-      prompt: "Make a 60-second video of flying cars",
-      mediaType: "video",
-      duration: "5s",
-    }),
   });
+  const jsonAuth = await resAuth.json();
 
-  const json2 = await res2.json();
-  const h2 = Object.fromEntries(res2.headers.entries());
+  assert(resAuth.status === 200, `GET /api/logs with valid token returns HTTP 200 OK (got ${resAuth.status})`);
+  assert(jsonAuth.success === true, `API returns success: true`);
+  assert(Array.isArray(jsonAuth.logs), `API returns array of server logs`);
 
-  assert(res2.status === 422, `Status is HTTP 422 (duration boundary error)`);
-  assert(h2["x-zyka-real-ip"] === "198.51.100.77", `Cloudflare IP takes precedence: ${h2["x-zyka-real-ip"]}`);
-  assert(h2["x-zyka-ip-source"] === "cf-connecting-ip", `IP source recorded as cf-connecting-ip`);
-  assert(json2.serverLog?.clientIp === "198.51.100.77", `serverLog.clientIp is 198.51.100.77`);
-
-  // TEST 3: User-Wise Tracing with Authenticated Creator ID
-  console.log(`\n[TEST 3] User-Wise Tracking (x-zyka-user-id: usr_creator_pro_alex)`);
-  const res3 = await fetch(`${BASE_URL}/api/generate`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-forwarded-for": "192.0.2.42",
-      "x-zyka-user-id": "usr_creator_pro_alex",
-      "user-agent": "CreatorStudioPro/3.0",
-      "x-zyka-request-id": "test-user-3",
-    },
-    body: JSON.stringify({
-      prompt: "Generate a still photo wallpaper of neon Kyoto",
-      mediaType: "video",
-    }),
-  });
-
-  const json3 = await res3.json();
-  const h3 = Object.fromEntries(res3.headers.entries());
-
-  assert(res3.status === 422, `Status is HTTP 422 (service mismatch)`);
-  assert(h3["x-zyka-user-id"] === "usr_creator_pro_alex", `Header preserves authenticated user ID`);
-  assert(json3.serverLog?.userId === "usr_creator_pro_alex", `serverLog.userId explicitly matches usr_creator_pro_alex`);
-  assert(json3.serverLog?.error.code === "ERR_SERVICE_MISMATCH_IMAGE_IN_VIDEO", `Recorded error code matches service mismatch`);
-
-  // TEST 4: Querying Server Error Logs via GET /api/logs
-  console.log(`\n[TEST 4] Querying Server Error Audit Endpoint: GET /api/logs`);
-  const resLogs = await fetch(`${BASE_URL}/api/logs`);
-  const jsonLogs = await resLogs.json();
-
-  assert(resLogs.status === 200, `GET /api/logs returns HTTP 200 OK`);
-  assert(jsonLogs.success === true, `API returns success: true`);
-  assert(Array.isArray(jsonLogs.logs), `API returns array of server logs`);
-  assert(jsonLogs.count >= 3, `Recorded at least 3 server error logs (got ${jsonLogs.count})`);
-
-  // TEST 5: Filter by Real IP: GET /api/logs?ip=203.0.113.195
-  console.log(`\n[TEST 5] Filter Server Logs by Real IP: GET /api/logs?ip=203.0.113.195`);
-  const resFilterIp = await fetch(`${BASE_URL}/api/logs?ip=203.0.113.195`);
-  const jsonFilterIp = await resFilterIp.json();
-
-  assert(jsonFilterIp.logs.length > 0, `Filtered logs returned entries`);
-  assert(
-    jsonFilterIp.logs.every((l) => l.clientIp === "203.0.113.195"),
-    `Every returned log entry belongs to client IP 203.0.113.195`
-  );
-
-  // TEST 6: Filter by User ID: GET /api/logs?userId=usr_creator_pro_alex
-  console.log(`\n[TEST 6] Filter Server Logs by User ID: GET /api/logs?userId=usr_creator_pro_alex`);
-  const resFilterUser = await fetch(`${BASE_URL}/api/logs?userId=usr_creator_pro_alex`);
-  const jsonFilterUser = await resFilterUser.json();
-
-  assert(jsonFilterUser.logs.length > 0, `Filtered logs for user found`);
-  assert(
-    jsonFilterUser.logs.every((l) => l.userId === "usr_creator_pro_alex"),
-    `Every returned log entry belongs to user usr_creator_pro_alex`
-  );
-
-  // TEST 7: Persistent File Verification on Disk
-  console.log(`\n[TEST 7] Verifying Log Persistence on Local Server Filesystem`);
-  const logFilePath = path.join(process.cwd(), "logs", "server-errors.log");
+  // TEST 5: Persistent File Verification on Disk
+  console.log(`\n[TEST 5] Verifying Log Persistence on Local Server Filesystem`);
   const jsonlFilePath = path.join(process.cwd(), "logs", "server-errors.jsonl");
-
-  const hasLogFile = fs.existsSync(logFilePath);
   const hasJsonlFile = fs.existsSync(jsonlFilePath);
 
-  assert(hasLogFile, `Formatted server log file exists at: logs/server-errors.log`);
   assert(hasJsonlFile, `Structured JSONL server log file exists at: logs/server-errors.jsonl`);
-
-  if (hasLogFile) {
-    const logContent = fs.readFileSync(logFilePath, "utf8");
-    assert(
-      logContent.includes("203.0.113.195"),
-      `Formatted log file contains recorded IP 203.0.113.195`
-    );
-    assert(
-      logContent.includes("usr_creator_pro_alex"),
-      `Formatted log file contains recorded user usr_creator_pro_alex`
-    );
-  }
 
   if (hasJsonlFile) {
     const jsonlContent = fs.readFileSync(jsonlFilePath, "utf8");
     const lines = jsonlContent.trim().split("\n").filter(Boolean);
-    assert(lines.length >= 3, `JSONL log contains at least 3 JSON records (got ${lines.length})`);
-    const parsedSample = JSON.parse(lines[lines.length - 1]);
-    assert(parsedSample.clientIp !== undefined, `JSONL entry has valid clientIp field`);
-    assert(parsedSample.userId !== undefined, `JSONL entry has valid userId field`);
-    assert(parsedSample.error?.code !== undefined, `JSONL entry has valid error.code field`);
+    assert(lines.length >= 1, `JSONL log contains at least 1 JSON record (got ${lines.length})`);
+    if (lines.length > 0) {
+      const parsedSample = JSON.parse(lines[lines.length - 1]);
+      assert(parsedSample.clientIp !== undefined, `JSONL entry has valid clientIp field`);
+      assert(parsedSample.userId !== undefined, `JSONL entry has valid userId field`);
+      assert(parsedSample.error?.code !== undefined, `JSONL entry has valid error.code field`);
+    }
   }
 
   // Summary

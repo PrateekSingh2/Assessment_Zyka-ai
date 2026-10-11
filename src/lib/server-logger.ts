@@ -28,36 +28,46 @@ function getFs(): typeof import("fs") | null {
   }
 }
 
+let writeQueue: Promise<void> = Promise.resolve();
+
 /**
  * Fully asynchronous append with rotation when file exceeds MAX_LOG_FILE_BYTES.
- * Never performs synchronous fs operations on the event loop.
+ * Serialized via writeQueue to prevent race conditions during rotation and concurrent writes.
  */
-async function appendLogAsync(entry: ServerErrorLogEntry): Promise<void> {
-  const fs = getFs();
-  if (!fs) return;
-  const fsp = fs.promises;
+function appendLogAsync(entry: ServerErrorLogEntry): Promise<void> {
+  writeQueue = writeQueue
+    .then(async () => {
+      const fs = getFs();
+      if (!fs) return;
+      const fsp = fs.promises;
 
-  try {
-    await fsp.mkdir(LOGS_DIR, { recursive: true }).catch(() => {});
+      try {
+        await fsp.mkdir(LOGS_DIR, { recursive: true }).catch(() => {});
 
-    // Check size asynchronously
-    let currentSize = 0;
-    try {
-      const stat = await fsp.stat(JSONL_LOG_FILE);
-      currentSize = stat.size;
-    } catch {
-      // File does not exist yet
-    }
+        let currentSize = 0;
+        try {
+          const stat = await fsp.stat(JSONL_LOG_FILE);
+          currentSize = stat.size;
+        } catch {
+          // File does not exist yet
+        }
 
-    // Rotate if over capacity: rename current to .1
-    if (currentSize >= MAX_LOG_FILE_BYTES) {
-      await fsp.rename(JSONL_LOG_FILE, ROTATED_LOG_FILE).catch(() => {});
-    }
+        // Rotate if over capacity: rename current to .1
+        if (currentSize >= MAX_LOG_FILE_BYTES) {
+          await fsp.rename(JSONL_LOG_FILE, ROTATED_LOG_FILE).catch(() => {});
+        }
 
-    await fsp.appendFile(JSONL_LOG_FILE, JSON.stringify(entry) + "\n", "utf8");
-  } catch (err) {
-    console.error("[server-logger] Async append error:", err instanceof Error ? err.message : err);
-  }
+        await fsp.appendFile(JSONL_LOG_FILE, JSON.stringify(entry) + "\n", "utf8");
+      } catch (err) {
+        console.error(
+          "[server-logger] Async append error:",
+          err instanceof Error ? err.message : err
+        );
+      }
+    })
+    .catch(() => {});
+
+  return writeQueue;
 }
 
 export interface RecordServerErrorParams {
@@ -175,12 +185,11 @@ let hasHydrated = false;
 
 /**
  * Returns filtered logs from the in-memory ring buffer.
- * If empty on initial request, triggers background disk hydration.
+ * If empty on initial request, awaits disk hydration.
  */
-export function getServerLogs(filters?: LogFilters): ServerErrorLogEntry[] {
+export async function getServerLogs(filters?: LogFilters): Promise<ServerErrorLogEntry[]> {
   if (!hasHydrated && inMemoryLogs.length === 0) {
-    hasHydrated = true;
-    hydrateLogsFromDisk();
+    await hydrateLogsFromDisk();
   }
 
   let result = [...inMemoryLogs];
@@ -210,6 +219,7 @@ export function clearServerLogs(): void {
  * One-time async hydration from disk into memory.
  */
 export async function hydrateLogsFromDisk(): Promise<void> {
+  hasHydrated = true;
   const fs = getFs();
   if (!fs) return;
 

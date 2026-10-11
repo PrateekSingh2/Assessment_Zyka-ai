@@ -45,22 +45,66 @@ export function normalizeAndValidateIp(raw: string): string | null {
 }
 
 /**
+ * Expands an IPv6 address to 8 full 4-digit hexadecimal groups.
+ * Properly expands zero-compression ("::") and pads groups.
+ */
+export function expandIpv6(ip: string): string | null {
+  const norm = normalizeAndValidateIp(ip);
+  if (!norm || !norm.includes(":")) return null;
+
+  const parts = norm.split("::");
+  if (parts.length > 2) return null;
+
+  const left = parts[0] ? parts[0].split(":").filter(Boolean) : [];
+  const right = parts.length === 2 && parts[1] ? parts[1].split(":").filter(Boolean) : [];
+  const missing = 8 - (left.length + right.length);
+  if (missing < 0) return null;
+
+  const full = [...left, ...Array<string>(missing).fill("0"), ...right].map((h) =>
+    h.padStart(4, "0")
+  );
+
+  if (full.length !== 8) return null;
+  return full.join(":");
+}
+
+/**
  * Returns a bucket key:
  * - For IPv4: returns the IP as-is (single /32).
- * - For IPv6: truncates to the first 4 hex groups (/64 prefix) to prevent single-connection flood.
+ * - For IPv6: expands zeros and truncates to the first 4 hex groups (/64 prefix)
+ *   to reliably prevent residential /64 flooding regardless of representation.
  */
 export function getIpSubnetKey(ip: string): string {
   const norm = normalizeAndValidateIp(ip) ?? "127.0.0.1";
   if (!norm.includes(":")) {
     return norm; // IPv4
   }
-  // Expand or split IPv6 into segments
-  // Quick normalization for IPv6 prefix
-  const parts = norm.split(":");
-  if (parts.length >= 4) {
-    return `${parts.slice(0, 4).join(":")}::/64`;
+
+  const expanded = expandIpv6(norm);
+  if (!expanded) {
+    return `${norm}::/64`;
   }
-  return `${norm}::/64`;
+
+  const parts = expanded.split(":");
+  return `${parts.slice(0, 4).join(":")}::/64`;
+}
+
+export function getTrustedHops(): number {
+  return Math.max(
+    0,
+    parseInt(process.env.TRUSTED_PROXY_HOPS ?? "0", 10) || 0
+  );
+}
+
+export function validateProductionProxyConfig(): void {
+  if (process.env.NODE_ENV === "production") {
+    const hops = getTrustedHops();
+    if (hops <= 0) {
+      throw new Error(
+        "FATAL: TRUSTED_PROXY_HOPS must be configured as an integer >= 1 in production"
+      );
+    }
+  }
 }
 
 /**
@@ -77,16 +121,18 @@ export function resolveClientIp(
     return rec[name] ?? rec[name.toLowerCase()] ?? null;
   };
 
-  if (TRUSTED_HOPS > 0) {
+  const trustedHops = getTrustedHops();
+
+  if (trustedHops > 0) {
     const xff = getHeader("x-forwarded-for");
     if (!xff) {
       throw new UntrustedOriginError("Missing X-Forwarded-For header from trusted proxy");
     }
     const parts = xff.split(",").map((p) => p.trim());
-    if (parts.length < TRUSTED_HOPS) {
+    if (parts.length < trustedHops) {
       throw new UntrustedOriginError("Insufficient proxy hops in X-Forwarded-For");
     }
-    const candidate = parts[parts.length - TRUSTED_HOPS] ?? "";
+    const candidate = parts[parts.length - trustedHops] ?? "";
     const validIp = normalizeAndValidateIp(candidate);
     if (!validIp) {
       throw new UntrustedOriginError("Invalid IP address in X-Forwarded-For");
@@ -94,10 +140,20 @@ export function resolveClientIp(
     return { ip: validIp, source: "x-forwarded-for" };
   }
 
-  // When TRUSTED_HOPS === 0
+  // When trustedHops === 0
   if (process.env.NODE_ENV === "production") {
     // Fail closed in production if TRUSTED_PROXY_HOPS is unconfigured
-    throw new Error("TRUSTED_PROXY_HOPS environment variable must be configured in production");
+    throw new UntrustedOriginError("TRUSTED_PROXY_HOPS environment variable must be configured in production");
+  }
+
+  // Development fallback: if explicit XFF is provided in test/dev, isolate by client IP; otherwise loopback
+  const devXff = getHeader("x-forwarded-for");
+  if (devXff) {
+    const first = devXff.split(",")[0]?.trim() ?? "";
+    const validDevIp = normalizeAndValidateIp(first);
+    if (validDevIp) {
+      return { ip: validDevIp, source: "x-forwarded-for" };
+    }
   }
 
   // Development fallback: return fixed loopback, NEVER the server's LAN IP

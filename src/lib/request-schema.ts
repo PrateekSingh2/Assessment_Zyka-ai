@@ -20,7 +20,7 @@ export const GenerateBody = z
     prompt: z
       .string()
       .min(1, "prompt cannot be empty")
-      .max(8_000, "prompt exceeds maximum length of 8,000 characters"),
+      .max(32_000, "prompt exceeds maximum allowed length"),
     mediaType: z.enum(VALID_MEDIA_TYPES).default("image"),
     duration: z.enum(VALID_DURATIONS).optional(),
     aspectRatio: z.enum(VALID_ASPECT_RATIOS).optional(),
@@ -35,8 +35,7 @@ export const GenerateBody = z
       .max(32)
       .regex(/^[\w .\-]+$/, "quality contains invalid characters")
       .default("High Quality"),
-  })
-  .strict();
+  });
 
 export type GenerateBodyInput = z.infer<typeof GenerateBody>;
 

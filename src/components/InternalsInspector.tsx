@@ -69,6 +69,7 @@ export function InternalsInspector({
     ip === "::ffff:127.0.0.1";
 
   const rawClientIp =
+    responseHeaders["x-zyka-resolved-ip"] ||
     responsePayload?.serverLog?.clientIp ||
     responseHeaders["x-zyka-real-ip"] ||
     requestHeaders["x-zyka-real-ip"] ||
@@ -84,11 +85,13 @@ export function InternalsInspector({
       : rawClientIp;
 
   const ipSource =
+    responseHeaders["x-zyka-resolved-ip-source"] ||
     responsePayload?.serverLog?.ipSource ||
     responseHeaders["x-zyka-ip-source"] ||
-    (realClientIp && isLoopback(rawClientIp) ? "client-public-wan" : null);
+    (realClientIp && isLoopback(rawClientIp) ? "client-public-wan" : (realClientIp ? "gateway-verified" : null));
 
   const resolvedUserId =
+    responseHeaders["x-zyka-resolved-user-id"] ||
     responsePayload?.serverLog?.userId ||
     responseHeaders["x-zyka-user-id"] ||
     requestHeaders["x-zyka-user-id"] ||

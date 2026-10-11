@@ -34,7 +34,13 @@ async function runTest(testId, description, options) {
   process.stdout.write(`\n[${testId}] ${description}\n`);
 
   try {
-    const clientIp = ip || `stress-test-ip-${testId}`;
+    let clientIp = ip;
+    if (!clientIp || !/^\d+\.\d+\.\d+\.\d+$/.test(clientIp)) {
+      const hash = Math.abs(testId.split("").reduce((acc, c) => (acc * 31 + c.charCodeAt(0)) | 0, 0));
+      const b2 = (hash >> 8) % 250 + 1;
+      const b3 = hash % 250 + 1;
+      clientIp = `198.51.${b2}.${b3}`;
+    }
     const fetchOptions = {
       method,
       headers: {
@@ -88,8 +94,8 @@ async function runTest(testId, description, options) {
         }
       }
     }
-    if (status >= 400 && !rawError && status !== 405) {
-      problems.push(`  MISSING: x-raw-upstream-error header not present on error response.`);
+    if (rawError) {
+      problems.push(`  CRITICAL LEAK: x-raw-upstream-error header leaked to client: "${rawError}"`);
     }
 
     if (problems.length === 0) {
@@ -493,7 +499,7 @@ async function main() {
   console.log(`  SECTION 8: SLIDING WINDOW RATE LIMIT STRESS`);
   console.log(`${"─".repeat(72)}`);
 
-  const stressIp = "stress-rate-192.168.200.100";
+  const stressIp = "198.51.100.99";
   console.log(`\n[S8-01] Firing 10 rapid requests from same IP — expect 429 starting at request 6`);
   const statusSequence = [];
   for (let i = 1; i <= 10; i++) {
@@ -522,7 +528,7 @@ async function main() {
   }
 
   await runTest("S8-02", "Fresh IP after rate limit test — must NOT be rate limited", {
-    ip: "unique-fresh-ip-stress-99999",
+    ip: "198.51.100.100",
     body: { prompt: "A beautiful ocean scene", mediaType: "image" },
     expectedStatus: 200,
     expectSuccess: true,

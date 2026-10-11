@@ -5,6 +5,8 @@
 
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
+    const { validateProductionProxyConfig } = await import("@/lib/client-ip");
+    validateProductionProxyConfig();
     const { hydrateLogsFromDisk } = await import("@/lib/server-logger");
     await hydrateLogsFromDisk();
   }

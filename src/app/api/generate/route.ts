@@ -118,15 +118,31 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           method: "POST",
           traceId,
         });
+        const headers = new Headers();
+        headers.set("x-zyka-sanitized-error", "Your request is too large. Please shorten your prompt.");
+        headers.set("x-zyka-error-code", "ERR_PAYLOAD_TOO_LARGE");
+        headers.set("x-zyka-middleware-processed", "true");
+        headers.set("x-zyka-trace-id", traceId);
+        headers.set("x-zyka-resolved-ip", identity.resolvedIp);
+        headers.set("x-zyka-resolved-ip-source", identity.ipSource);
+        headers.set("x-zyka-resolved-user-id", identity.resolvedUserId);
         return NextResponse.json(
           publicErrorBody(413, traceId, "Your request is too large. Please shorten your prompt.", "Keep your prompt under 8,000 characters.", "VALIDATION"),
-          { status: 413 }
+          { status: 413, headers }
         );
       }
       if (e instanceof MalformedJsonError) {
+        const headers = new Headers();
+        headers.set("x-zyka-sanitized-error", "Invalid JSON body.");
+        headers.set("x-zyka-error-code", "ERR_MALFORMED_JSON");
+        headers.set("x-zyka-middleware-processed", "true");
+        headers.set("x-zyka-trace-id", traceId);
+        headers.set("x-zyka-resolved-ip", identity.resolvedIp);
+        headers.set("x-zyka-resolved-ip-source", identity.ipSource);
+        headers.set("x-zyka-resolved-user-id", identity.resolvedUserId);
         return NextResponse.json(
           publicErrorBody(400, traceId, "Invalid JSON body.", "Send a valid JSON object with a prompt field.", "VALIDATION"),
-          { status: 400 }
+          { status: 400, headers }
         );
       }
       throw e; // Re-throw unexpected errors to outer catch
@@ -152,9 +168,17 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         method: "POST",
         traceId,
       });
+      const headers = new Headers();
+      headers.set("x-zyka-sanitized-error", sanitizeHeaderValue(`Invalid ${field}: ${detail}`));
+      headers.set("x-zyka-error-code", "ERR_SCHEMA_VALIDATION");
+      headers.set("x-zyka-middleware-processed", "true");
+      headers.set("x-zyka-trace-id", traceId);
+      headers.set("x-zyka-resolved-ip", identity.resolvedIp);
+      headers.set("x-zyka-resolved-ip-source", identity.ipSource);
+      headers.set("x-zyka-resolved-user-id", identity.resolvedUserId);
       return NextResponse.json(
         publicErrorBody(422, traceId, `Invalid ${field}: ${detail}`, "Check your prompt and parameters.", "VALIDATION"),
-        { status: 422 }
+        { status: 422, headers }
       );
     }
 
@@ -217,7 +241,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         ),
         {
           status: translated.statusCode,
-          headers: translated.responseHeaders,
+          headers: {
+            ...translated.responseHeaders,
+            "x-zyka-resolved-ip": sanitizeHeaderValue(identity.resolvedIp),
+            "x-zyka-resolved-ip-source": sanitizeHeaderValue(identity.ipSource),
+            "x-zyka-resolved-user-id": sanitizeHeaderValue(identity.resolvedUserId),
+          },
         }
       );
     }
@@ -231,6 +260,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       "x-zyka-completed-at": new Date().toISOString(),
       "x-zyka-trace-id": sanitizeHeaderValue(traceId),
       "x-zyka-resolved-ip": sanitizeHeaderValue(identity.resolvedIp),
+      "x-zyka-resolved-ip-source": sanitizeHeaderValue(identity.ipSource),
+      "x-zyka-resolved-user-id": sanitizeHeaderValue(identity.resolvedUserId),
     };
 
     // Forward allowed upstream headers with sanitization applied

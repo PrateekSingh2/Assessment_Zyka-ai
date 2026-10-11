@@ -150,9 +150,11 @@ export async function executeMockUpstreamAI(params: {
     };
   }
 
-  // 6. Edge Case: Service Mismatch in Voice tab
+  // 6. Edge Case: Service Mismatch in Voice tab (only if prompt directs visual generation)
   const isAskingForVisualInVoice =
-    /\b(photo|picture|image|video|wallpaper|drawing|animation)\b/i.test(trimmed);
+    /\b(?:generate|create|render|make|draw|design)\s+(?:an?\s+)?(?:[a-z0-9_-]+\s+){0,3}(?:photo|picture|image|video|wallpaper|drawing|animation|sketch|portrait|illustration)\b/i.test(
+      trimmed
+    );
   if (normalizedType === "voice" && isAskingForVisualInVoice) {
     return {
       status: 422,
@@ -181,8 +183,8 @@ export async function executeMockUpstreamAI(params: {
 
     if (!isPlaceOrDecade) {
       const allDurationMatches = [
-        ...trimmed.matchAll(/(?<![\d:])(\d{1,3})\s*(seconds?|secs?)\b/gi),
-        ...trimmed.matchAll(/(?<![\d:])(\d{1,3})\s*(minutes?|mins?|hours?|hrs?)\b/gi),
+        ...trimmed.matchAll(/(?<![\d:])(\d{1,3})[\s-]*(seconds?|secs?|s)\b/gi),
+        ...trimmed.matchAll(/(?<![\d:])(\d{1,3})[\s-]*(minutes?|mins?|hours?|hrs?)\b/gi),
       ];
 
       for (const m of allDurationMatches) {
@@ -249,28 +251,36 @@ export async function executeMockUpstreamAI(params: {
   // 8. Edge Case: Generic Aspect Ratio Detection & Mismatch in Prompt
   const supportedRatios: AspectRatio[] = ["16:9", "9:16", "1:1", "4:3", "21:9"];
 
-  // FIX (N4): Clock times like "9:16" or "10:45" must NOT be treated as aspect ratios
-  // unless explicitly preceded by aspect ratio context keywords (e.g. "aspect ratio 9:16").
-  const RATIO_CONTEXT_RE = /(?:aspect\s*ratio|ratio|widescreen|letterbox|portrait\s*mode|landscape\s*mode)\s*[:\-]?\s*(\d{1,4}:\d{1,4})/i;
-  const ANY_RATIO_RE = /\b(\d{1,4}:\d{1,4})\b/gi;
+  // Match explicit aspect ratio context keywords prefix (e.g. "aspect ratio 9:16", "format 16:9", "ratio: 17:8")
+  const RATIO_PREFIX_RE = /(?:aspect\s*ratio|ratio|format|widescreen|letterbox|portrait\s*mode|landscape\s*mode)\s*[:\-]?\s*(\d{1,4}:\d{1,4})/i;
+  // Match postfix context (e.g. "17:8 aspect ratio", "16:9 ratio", "1:1 format")
+  const RATIO_POSTFIX_RE = /(\d{1,4}:\d{1,4})\s*(?:aspect\s*ratio|ratio|format|frame|resolution)/i;
+  // Match explicit visual ratio (e.g. "image 17:8", "image in 17:8", "100:100 square image")
+  const EXPLICIT_VISUAL_RE = /(?:(?:image|photo|video|frame|render|canvas|resolution)\s+(?:in\s+)?(\d{1,4}:\d{1,4})|(\d{1,4}:\d{1,4})\s+(?:square|widescreen|portrait|landscape|cinematic))/i;
+  // Match standard supported ratios mentioned standalone (e.g. "image in 16:9", "create a 9:16 vertical video")
+  const STANDALONE_SUPPORTED_RE = /\b(16:9|9:16|1:1|4:3|21:9)\b/i;
 
-  let ratioMatch: RegExpExecArray | null = RATIO_CONTEXT_RE.exec(trimmed);
+  let extractedRatio: string | null = null;
+  const prefixMatch = RATIO_PREFIX_RE.exec(trimmed);
+  const postfixMatch = RATIO_POSTFIX_RE.exec(trimmed);
+  const visualMatch = EXPLICIT_VISUAL_RE.exec(trimmed);
 
-  if (!ratioMatch) {
-    // Only evaluate bare X:Y if it DOES NOT look like a valid clock time (hours 0-23, mins 0-59)
-    for (const m of trimmed.matchAll(ANY_RATIO_RE)) {
-      const [h, min] = m[1].split(":").map(Number);
-      const isClockTime = h >= 0 && h <= 23 && min >= 0 && min <= 59;
-      if (!isClockTime) {
-        ratioMatch = m as unknown as RegExpExecArray;
-        break;
-      }
+  if (prefixMatch) {
+    extractedRatio = prefixMatch[1] ?? null;
+  } else if (postfixMatch) {
+    extractedRatio = postfixMatch[1] ?? null;
+  } else if (visualMatch) {
+    extractedRatio = visualMatch[1] || visualMatch[2] || null;
+  } else {
+    // Check if prompt specifies a supported ratio standalone without clock context
+    const isClockTime = /\b(?:clock|time|showing|watch|timer|at)\s+\d{1,2}:\d{2}\b/i.test(trimmed) || /\b\d{1,2}:\d{2}\s*(?:am|pm)\b/i.test(trimmed);
+    const supportedMatch = STANDALONE_SUPPORTED_RE.exec(trimmed);
+    if (supportedMatch && !isClockTime) {
+      extractedRatio = supportedMatch[1] ?? null;
     }
   }
 
-
-  if (ratioMatch && normalizedType !== "voice") {
-    const extractedRatio = ratioMatch[1] || ratioMatch[0];
+  if (extractedRatio && normalizedType !== "voice") {
 
     // Subcase 8A: Ratio is completely unsupported by Zyka AI (like 17:8, 32:9, 2:1, 5:4)
     if (!supportedRatios.includes(extractedRatio as AspectRatio)) {

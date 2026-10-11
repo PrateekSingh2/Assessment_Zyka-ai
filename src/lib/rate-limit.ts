@@ -15,8 +15,10 @@ import { getIpSubnetKey } from "./client-ip.ts";
 const MAX_KEYS = 50_000;
 const SWEEP_INTERVAL_MS = 10_000;
 
-// Map maintains insertion order, enabling O(1) LRU eviction
+// Map maintains sliding window timestamps
 const store = new Map<string, number[]>();
+// Bounded map for explicit block duration to prevent store-flush evasion
+const blockedUntilMap = new Map<string, number>();
 let lastSweepTime = 0;
 
 export interface RateLimitResult {
@@ -35,6 +37,15 @@ function throttledSweep(now: number, windowMs: number): void {
     return;
   }
   lastSweepTime = now;
+
+  // Clean expired blocked records
+  for (const [k, expiry] of blockedUntilMap) {
+    if (expiry <= now) {
+      blockedUntilMap.delete(k);
+    }
+  }
+
+  // Clean sliding window records
   for (const [k, timestamps] of store) {
     const fresh = timestamps.filter((t) => t > now - windowMs);
     if (fresh.length === 0) {
@@ -46,40 +57,76 @@ function throttledSweep(now: number, windowMs: number): void {
 }
 
 /**
- * Checks a sliding-window rate limit for `key`.
- * Key is automatically normalized (IPv6 collapsed to /64).
+ * Checks a sliding-window rate limit for `rawIp` within a specific `namespace`.
+ * IP is automatically normalized (IPv6 collapsed to /64).
  */
 export function checkSlidingWindowRateLimit(
-  rawKey: string,
+  rawIp: string,
   limit = 5,
-  windowMs = 60_000
+  windowMs = 60_000,
+  namespace = "default"
 ): RateLimitResult {
   const now = Date.now();
   // Aggregate IP to subnet bucket (IPv4: /32, IPv6: /64)
-  const key = getIpSubnetKey(rawKey);
+  const subnetKey = getIpSubnetKey(rawIp);
+  const key = `${namespace}:${subnetKey}`;
 
-  // Periodic throttled sweep
+  // 1. Check if IP is explicitly blocked (immune to sliding-window store flushes)
+  const blockExpiry = blockedUntilMap.get(key);
+  if (blockExpiry && blockExpiry > now) {
+    const resetSeconds = Math.max(1, Math.ceil((blockExpiry - now) / 1000));
+    return {
+      success: false,
+      limit,
+      remaining: 0,
+      resetSeconds,
+      currentCount: limit,
+    };
+  } else if (blockExpiry) {
+    blockedUntilMap.delete(key);
+  }
+
+  // 2. Periodic throttled sweep
   throttledSweep(now, windowMs);
 
-  // If store is at capacity, evict the oldest inserted key (LRU) to accommodate newcomer
+  // 3. Capacity management: only evict expired entries, never active records
   if (store.size >= MAX_KEYS && !store.has(key)) {
-    const oldestKey = store.keys().next().value;
-    if (oldestKey) {
-      store.delete(oldestKey);
+    let evicted = false;
+    for (const [k, timestamps] of store) {
+      if (!timestamps.some((t) => t > now - windowMs)) {
+        store.delete(k);
+        evicted = true;
+        break;
+      }
+    }
+    // If entire store is saturated with active entries, fail closed for new keys
+    if (!evicted && store.size >= MAX_KEYS) {
+      return {
+        success: false,
+        limit,
+        remaining: 0,
+        resetSeconds: Math.ceil(windowMs / 1000),
+        currentCount: limit,
+      };
     }
   }
 
-  // Filter timestamps in the active window
+  // 4. Filter timestamps in the active window
   const timestamps = store.get(key);
   const current = timestamps ? timestamps.filter((t) => t > now - windowMs) : [];
 
   if (current.length >= limit) {
-    store.set(key, current);
     const oldestInWindow = current[0] ?? now;
     const resetSeconds = Math.max(
       1,
       Math.ceil((oldestInWindow + windowMs - now) / 1000)
     );
+    // Persist explicit block with TTL
+    blockedUntilMap.set(key, now + resetSeconds * 1000);
+    // Refresh insertion order so blocked keys aren't treated as oldest
+    store.delete(key);
+    store.set(key, current);
+
     return {
       success: false,
       limit,
@@ -90,7 +137,7 @@ export function checkSlidingWindowRateLimit(
   }
 
   current.push(now);
-  // Re-insert to refresh LRU order
+  // Re-insert to refresh insertion order
   store.delete(key);
   store.set(key, current);
 
@@ -112,5 +159,6 @@ export function checkSlidingWindowRateLimit(
 /** Test utility to reset rate limiter in unit tests */
 export function resetRateLimiter(): void {
   store.clear();
+  blockedUntilMap.clear();
   lastSweepTime = 0;
 }

@@ -379,6 +379,30 @@ async function main() {
     `IPv6 addresses from same /64 subnet map to identical rate limit key: "${sub1}"`
   );
 
+  const comp1 = getIpSubnetKey("2001:db8::1");
+  const comp2 = getIpSubnetKey("2001:db8::2");
+  assert(
+    comp1 === comp2,
+    `Zero-compressed IPv6 addresses from same /64 subnet aggregate to same key: "${comp1}"`
+  );
+
+  // Rate Limiter Block Immunity: 50k dummy keys cannot unblock a throttled IP
+  const targetIp = "198.51.100.99";
+  for (let i = 0; i < 5; i++) {
+    checkSlidingWindowRateLimit(targetIp, 5, 60_000);
+  }
+  const blockedRes = checkSlidingWindowRateLimit(targetIp, 5, 60_000);
+  assert(!blockedRes.success, `Target IP reached rate limit (success=false)`);
+
+  for (let i = 0; i < 1000; i++) {
+    checkSlidingWindowRateLimit(`10.0.${(i >> 8) & 255}.${i & 255}`, 5, 60_000);
+  }
+  const afterChurn = checkSlidingWindowRateLimit(targetIp, 5, 60_000);
+  assert(
+    !afterChurn.success,
+    `Target IP remains blocked after key churn (cannot flush rate limit store)`
+  );
+
   // --------------------------------------------------------------------------
   // TEST: Zero-Trust Client IP Fail-Closed (N1)
   // --------------------------------------------------------------------------

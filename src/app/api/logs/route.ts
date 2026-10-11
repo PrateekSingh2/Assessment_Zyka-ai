@@ -16,9 +16,10 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { getServerLogs } from "@/lib/server-logger";
+import { generateSecureTraceId } from "@/lib/middleware/error-interceptor";
 
 const QuerySchema = z.object({
   ip: z.string().max(45).optional(),
@@ -29,36 +30,45 @@ const QuerySchema = z.object({
 
 /**
  * Timing-safe Bearer token validation.
- * Returns false (deny) if ADMIN_API_TOKEN is not configured or too short.
+ * Uses SHA-256 digests to normalize buffer lengths before timingSafeEqual,
+ * preventing length-leak oracles and multibyte UTF-8 comparison bugs.
  */
 function isAdmin(req: NextRequest): boolean {
   const expected = process.env.ADMIN_API_TOKEN ?? "";
-  // Require at least 32 characters — reject misconfigured short tokens
   if (expected.length < 32) return false;
 
-  const given = (req.headers.get("authorization") ?? "").replace(
-    /^Bearer\s+/i,
-    ""
-  );
+  const authHeader = (req.headers.get("authorization") ?? "").trim();
+  if (!authHeader.toLowerCase().startsWith("bearer ")) return false;
+  const given = authHeader.slice(7).trim();
+  if (given.length === 0) return false;
 
-  // Pad to equal length before comparing to avoid length oracle
-  const exp = Buffer.from(expected, "utf8");
-  const got = Buffer.from(given.padEnd(expected.length, "\0"), "utf8");
+  const expHash = createHash("sha256").update(expected, "utf8").digest();
+  const gotHash = createHash("sha256").update(given, "utf8").digest();
 
-  if (exp.length !== got.length) return false;
-  return timingSafeEqual(exp, got);
+  return timingSafeEqual(expHash, gotHash);
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
+  const traceId = generateSecureTraceId();
+
   // SECURITY (N6): Fail-closed by default across all environments (production, staging, test, unset)
   // Only permit unauthenticated access if explicitly in development AND ALLOW_PUBLIC_LOGS=1
   const allowDevPublic =
     process.env.NODE_ENV === "development" && process.env.ALLOW_PUBLIC_LOGS === "1";
 
   if (!allowDevPublic && !isAdmin(req)) {
-    // Return 404 instead of 401 to prevent endpoint discovery
+    // Return 404 with unified error structure
     return NextResponse.json(
-      { success: false, error: "Not found" },
+      {
+        success: false as const,
+        statusCode: 404,
+        traceId,
+        sanitizedError: {
+          userMessage: "Endpoint not found.",
+          category: "SYSTEM" as const,
+          actionableTip: "Verify your request route and authorization credentials.",
+        },
+      },
       { status: 404, headers: { "Cache-Control": "no-store" } }
     );
   }
@@ -68,12 +78,21 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
 
   if (!parsed.success) {
     return NextResponse.json(
-      { success: false, error: "Invalid query parameters" },
+      {
+        success: false as const,
+        statusCode: 400,
+        traceId,
+        sanitizedError: {
+          userMessage: "Invalid query parameters.",
+          category: "VALIDATION" as const,
+          actionableTip: "Ensure query parameters conform to schema bounds.",
+        },
+      },
       { status: 400 }
     );
   }
 
-  const logs = getServerLogs(parsed.data);
+  const logs = await getServerLogs(parsed.data);
 
   return NextResponse.json(
     {

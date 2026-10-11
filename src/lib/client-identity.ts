@@ -105,59 +105,12 @@ export async function fetchRealClientIp(): Promise<DiscoveredIpResult> {
     return { ip: "127.0.0.1", source: "fallback", isLocalhost: true };
   }
 
-  // Check session cache first for instant UI response
+  // Check session cache first for instant UI response (populated from authoritative server response headers)
   try {
     const cached = sessionStorage.getItem(REAL_IP_STORAGE_KEY);
     if (cached) {
       const parsed = JSON.parse(cached);
-      return { ip: parsed.ip, source: "cached", isLocalhost: parsed.isLocalhost };
-    }
-  } catch {}
-
-  // 1. Try public IP service from the browser (discovers real internet IP on localhost!)
-  try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 2500);
-
-    const res = await fetch("https://api.ipify.org?format=json", {
-      signal: controller.signal,
-    });
-    clearTimeout(timeoutId);
-
-    if (res.ok) {
-      const data = await res.json();
-      if (data.ip) {
-        const result: DiscoveredIpResult = {
-          ip: data.ip,
-          source: "public-api",
-          isLocalhost: window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1",
-        };
-        try {
-          sessionStorage.setItem(REAL_IP_STORAGE_KEY, JSON.stringify(result));
-        } catch {}
-        return result;
-      }
-    }
-  } catch {
-    // Continue to server LAN fallback
-  }
-
-  // 2. Query internal system /api/my-ip endpoint (resolves LAN IP from system interfaces on localhost)
-  try {
-    const localRes = await fetch("/api/my-ip");
-    if (localRes.ok) {
-      const localData = await localRes.json();
-      if (localData.ip) {
-        const result: DiscoveredIpResult = {
-          ip: localData.ip,
-          source: "lan-network",
-          isLocalhost: localData.isLocalhost || true,
-        };
-        try {
-          sessionStorage.setItem(REAL_IP_STORAGE_KEY, JSON.stringify(result));
-        } catch {}
-        return result;
-      }
+      return { ip: parsed.ip || "127.0.0.1", source: "cached", isLocalhost: Boolean(parsed.isLocalhost) };
     }
   } catch {}
 

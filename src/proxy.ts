@@ -24,6 +24,10 @@ const CLIENT_SPOOFABLE_HEADERS = [
   "cf-connecting-ip",
   "true-client-ip",
   "x-real-ip",
+  "x-zyka-resolved-ip",
+  "x-zyka-resolved-ip-source",
+  "x-zyka-resolved-user-id",
+  "x-zyka-proxy-intercepted",
 ] as const;
 
 /**
@@ -109,13 +113,36 @@ export function proxy(request: NextRequest) {
             Allow: "POST",
             "x-zyka-middleware-processed": "true",
             "x-zyka-resolved-ip": realClientIp,
+            "x-zyka-resolved-ip-source": ipSource,
+            "x-zyka-resolved-user-id": resolvedUserId,
           }
         );
       }
 
-      // Check rate limit: 5 req/min for generate, 30 req/min for logs
-      const limit = pathname.startsWith("/api/generate") ? 5 : 30;
-      const rateLimit = checkSlidingWindowRateLimit(realClientIp, limit, 60_000);
+      // For /api/logs: enforce GET method check BEFORE rate limit consumption
+      if (pathname.startsWith("/api/logs") && request.method !== "GET") {
+        const traceId = generateSecureTraceId();
+        return buildErrorResponse(
+          405,
+          traceId,
+          "Method Not Allowed. Only GET requests are accepted.",
+          "Send a GET request to query server logs.",
+          "SYSTEM",
+          {
+            Allow: "GET",
+            "x-zyka-middleware-processed": "true",
+            "x-zyka-resolved-ip": realClientIp,
+            "x-zyka-resolved-ip-source": ipSource,
+            "x-zyka-resolved-user-id": resolvedUserId,
+          }
+        );
+      }
+
+      // Check partitioned rate limit: 5 req/min for generate, 30 req/min for logs
+      const isGenerate = pathname.startsWith("/api/generate");
+      const limit = isGenerate ? 5 : 30;
+      const namespace = isGenerate ? "gen" : "logs";
+      const rateLimit = checkSlidingWindowRateLimit(realClientIp, limit, 60_000, namespace);
 
       if (!rateLimit.success) {
         const traceId = generateSecureTraceId();
@@ -158,6 +185,8 @@ export function proxy(request: NextRequest) {
             "Retry-After": rateLimit.resetSeconds.toString(),
             "x-zyka-middleware-processed": "true",
             "x-zyka-resolved-ip": realClientIp,
+            "x-zyka-resolved-ip-source": ipSource,
+            "x-zyka-resolved-user-id": resolvedUserId,
           }
         );
       }
@@ -201,6 +230,8 @@ export function proxy(request: NextRequest) {
             ...translated.responseHeaders,
             "x-zyka-middleware-processed": "true",
             "x-zyka-resolved-ip": realClientIp,
+            "x-zyka-resolved-ip-source": ipSource,
+            "x-zyka-resolved-user-id": resolvedUserId,
           }
         );
       }
