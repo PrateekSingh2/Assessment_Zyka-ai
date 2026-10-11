@@ -98,14 +98,41 @@ export default function Home() {
   // Network & Header Telemetry
   const [requestHeaders, setRequestHeaders] = useState<Record<string, string>>({});
   const [responseHeaders, setResponseHeaders] = useState<Record<string, string>>({});
-  const [responsePayload, setResponsePayload] = useState<any>(null);
+  const [responsePayload, setResponsePayload] = useState<unknown>(null);
   const [rawError, setRawError] = useState<UpstreamErrorDetail | null>(null);
   const [sanitizedError, setSanitizedError] = useState<SanitizedErrorDetail | null>(null);
   const [statusCode, setStatusCode] = useState<number | null>(null);
+  const [cooldownSeconds, setCooldownSeconds] = useState<number>(0);
+
+  // Active rate-limit cooldown countdown timer (E3)
+  useEffect(() => {
+    if (cooldownSeconds <= 0) return;
+    const interval = setInterval(() => {
+      setCooldownSeconds((prev) => Math.max(0, prev - 1));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [cooldownSeconds]);
+
+  const VALID_CATEGORIES = new Set<SanitizedErrorDetail["category"]>([
+    "SERVICE_MISMATCH",
+    "WORD_LIMIT",
+    "DURATION",
+    "FORMAT",
+    "ASPECT_RATIO",
+    "RATE_LIMIT",
+    "VALIDATION",
+    "SAFETY",
+    "SYSTEM",
+  ]);
+  const getSafeCategory = (cat: unknown): SanitizedErrorDetail["category"] => {
+    return typeof cat === "string" && VALID_CATEGORIES.has(cat as SanitizedErrorDetail["category"])
+      ? (cat as SanitizedErrorDetail["category"])
+      : "SYSTEM";
+  };
 
   const handleGenerate = async (payload: GenerationRequestPayload) => {
-    // Prevent double execution if already loading
-    if (isLoading) return;
+    // Prevent double execution if already loading or in active cooldown
+    if (isLoading || cooldownSeconds > 0) return;
 
     setIsLoading(true);
     setResult(null);
@@ -138,128 +165,39 @@ export default function Home() {
 
     setRequestHeaders(telemetryDisplayHeaders);
 
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 60_000);
+    let res: Response;
+
     try {
-      const res = await fetch("/api/generate", {
+      res = await fetch("/api/generate", {
         method: "POST",
         headers: outgoingHeaders, // Valid RFC-compliant headers only
         body: JSON.stringify(payload),
+        signal: ctrl.signal,
       });
-
-      // 2. Extract Response Headers
-      const incomingHeaders: Record<string, string> = {};
-      res.headers.forEach((val, key) => {
-        incomingHeaders[key] = val;
-      });
-      setResponseHeaders(incomingHeaders);
-      setStatusCode(res.status);
-
-      const json = await res.json();
-      setResponsePayload(json);
-
-      // Extract authoritative IP recorded in the server-level error log or telemetry headers
-      // Extract authoritative server-verified IP from response headers
-      const serverReportedIp =
-        incomingHeaders["x-zyka-resolved-ip"] ||
-        incomingHeaders["x-zyka-real-ip"];
-      const isLoopbackVal = (val?: string) =>
-        !val || val === "::1" || val === "127.0.0.1" || val.startsWith("127.");
-
-      const activeRealIp =
-        serverReportedIp && !isLoopbackVal(serverReportedIp)
-          ? serverReportedIp
-          : realIp;
-
-      if (serverReportedIp && !isLoopbackVal(serverReportedIp) && serverReportedIp !== realIp) {
-        setRealIp(serverReportedIp);
-        setIpSource("Gateway Verified");
-      }
-
-      if (!res.ok || !json.success) {
-        const traceId = json.traceId || incomingHeaders["x-zyka-trace-id"] || requestId;
-
-        // Extract sanitized human-readable message from unified error response or headers
-        const sanitizedMsg =
-          json.sanitizedError?.userMessage ||
-          incomingHeaders["x-zyka-sanitized-error"] ||
-          "An error occurred during generation.";
-
-        const cleanErr: SanitizedErrorDetail = {
-          userMessage: sanitizedMsg,
-          category: json.sanitizedError?.category || (incomingHeaders["x-zyka-error-category"] as SanitizedErrorDetail["category"]) || "SYSTEM",
-          actionableTip:
-            json.sanitizedError?.actionableTip || "Please review your prompt.",
-          suggestedService: json.sanitizedError?.suggestedService,
-          suggestedRatio: json.sanitizedError?.suggestedRatio,
-          suggestedDuration: json.sanitizedError?.suggestedDuration,
-          actionLabel: json.sanitizedError?.actionLabel,
-        };
-
-        const rawErr: UpstreamErrorDetail = {
-          code: incomingHeaders["x-zyka-error-code"] || "ERR_GATEWAY",
-          technicalMessage: `Request failed with HTTP ${res.status}. TraceID: ${traceId}`,
-          upstreamService: "Zyka-Gateway",
-          traceId,
-        };
-
-        setRawError(rawErr);
-        setSanitizedError(cleanErr);
-        setError(cleanErr.userMessage);
-
-        // Record error in operations log using exact server-recorded real IP
-        recordOperationLog({
-          type: res.status === 429 ? "RATE_LIMIT_ENGAGED" : "ERROR_INTERCEPTED",
-          status: "ERROR",
-          statusCode: res.status,
-          realIp: activeRealIp,
-          ipType: ipSource,
-          username,
-          mediaType: payload.mediaType,
-          promptSnippet: payload.prompt,
-          summary: cleanErr.userMessage,
-          technicalDetails: rawErr.technicalMessage,
-          sanitizedMessage: cleanErr.userMessage,
-          actionableTip: cleanErr.actionableTip,
-        });
-      } else {
-        setResult({
-          mediaUrl: json.data.mediaUrl,
-          mediaType: json.data.mediaType,
-          duration: json.data.duration,
-          aspectRatio: json.data.aspectRatio,
-          resolution: json.data.resolution,
-          model: json.data.model,
-          quality: json.data.quality,
-          prompt: payload.prompt,
-        });
-
-        // Record success in operations log using exact server-recorded real IP
-        recordOperationLog({
-          type: "GENERATION_SUCCESS",
-          status: "SUCCESS",
-          statusCode: 200,
-          realIp: activeRealIp,
-          ipType: ipSource,
-          username,
-          mediaType: payload.mediaType,
-          promptSnippet: payload.prompt,
-          summary: `Successfully synthesized ${payload.mediaType.toUpperCase()} artifact (200 OK)`,
-        });
-      }
-    } catch (networkErr: any) {
-      console.error("Network Fetch Error:", networkErr);
-      const networkMsg = `[FATAL] NetworkTransportFailure: Failed to reach gateway.\nDetails: ${networkErr?.message || "ERR_CONNECTION_REFUSED"}`;
+    } catch (networkErr: unknown) {
+      clearTimeout(timer);
+      const isTimeout =
+        networkErr instanceof DOMException && networkErr.name === "AbortError";
+      const errCode = isTimeout ? "ERR_CLIENT_TIMEOUT" : "ERR_NETWORK_DISCONNECTED";
+      const userMessage = isTimeout
+        ? "Request timed out after 60 seconds. Please try a simpler prompt."
+        : "Network connection lost. Please verify your connection.";
 
       const rawErr: UpstreamErrorDetail = {
-        code: "ERR_NETWORK_DISCONNECTED",
-        technicalMessage: networkMsg,
+        code: errCode,
+        technicalMessage: `Client transport error: ${networkErr instanceof Error ? networkErr.message : String(networkErr)}`,
         upstreamService: "Client-Network-Layer",
         traceId: requestId,
       };
 
       const cleanErr: SanitizedErrorDetail = {
-        userMessage: "Network connection lost. Please verify your connection.",
+        userMessage,
         category: "SYSTEM",
-        actionableTip: "Check your local connection and retry.",
+        actionableTip: isTimeout
+          ? "Try a shorter duration or simpler prompt scene."
+          : "Check your local connection and retry.",
       };
 
       setRawError(rawErr);
@@ -281,9 +219,162 @@ export default function Home() {
         sanitizedMessage: cleanErr.userMessage,
         actionableTip: cleanErr.actionableTip,
       });
-    } finally {
       setIsLoading(false);
+      return;
+    } finally {
+      clearTimeout(timer);
     }
+
+    // 2. Extract Response Headers safely
+    const incomingHeaders: Record<string, string> = {};
+    res.headers.forEach((val, key) => {
+      incomingHeaders[key] = val;
+    });
+    setResponseHeaders(incomingHeaders);
+    setStatusCode(res.status);
+
+    // Read Retry-After on 429 to engage UI cooldown (E3)
+    const retryAfter = Number(res.headers.get("retry-after"));
+    if (res.status === 429 && retryAfter > 0) {
+      setCooldownSeconds(retryAfter);
+    }
+
+    const serverReportedIp =
+      incomingHeaders["x-zyka-resolved-ip"] ||
+      incomingHeaders["x-zyka-real-ip"];
+    const isLoopbackVal = (val?: string) =>
+      !val || val === "::1" || val === "127.0.0.1" || val.startsWith("127.");
+
+    const activeRealIp =
+      serverReportedIp && !isLoopbackVal(serverReportedIp)
+        ? serverReportedIp
+        : realIp;
+
+    if (serverReportedIp && !isLoopbackVal(serverReportedIp) && serverReportedIp !== realIp) {
+      setRealIp(serverReportedIp);
+      setIpSource("Gateway Verified");
+    }
+
+    // 3. Extract text first to handle non-JSON gateway HTML error responses (E3)
+    const rawText = await res.text();
+    let json: Record<string, unknown> | null = null;
+    try {
+      json = JSON.parse(rawText) as Record<string, unknown>;
+    } catch {
+      const isGateway = res.status >= 500;
+      const userMessage = isGateway
+        ? `Gateway Error (HTTP ${res.status}). Upstream server returned a non-JSON response.`
+        : `Server Error (HTTP ${res.status}).`;
+
+      const cleanErr: SanitizedErrorDetail = {
+        userMessage,
+        category: "SYSTEM",
+        actionableTip: "Please retry in a moment or verify your request parameters.",
+      };
+
+      const rawErr: UpstreamErrorDetail = {
+        code: `ERR_HTTP_${res.status}`,
+        technicalMessage: `Non-JSON payload from server (HTTP ${res.status}): ${rawText.substring(0, 300)}`,
+        upstreamService: "Gateway-Edge-Proxy",
+        traceId: requestId,
+      };
+
+      setRawError(rawErr);
+      setSanitizedError(cleanErr);
+      setError(cleanErr.userMessage);
+      setResponsePayload({ error: userMessage, raw: rawText.substring(0, 500) });
+
+      recordOperationLog({
+        type: "ERROR_INTERCEPTED",
+        status: "ERROR",
+        statusCode: res.status,
+        realIp: activeRealIp,
+        ipType: ipSource,
+        username,
+        mediaType: payload.mediaType,
+        promptSnippet: payload.prompt,
+        summary: cleanErr.userMessage,
+        technicalDetails: rawErr.technicalMessage,
+        sanitizedMessage: cleanErr.userMessage,
+        actionableTip: cleanErr.actionableTip,
+      });
+      setIsLoading(false);
+      return;
+    }
+
+    setResponsePayload(json);
+
+    if (!res.ok || !json.success) {
+      const traceId = (json.traceId as string) || incomingHeaders["x-zyka-trace-id"] || requestId;
+      const errorObj = json.sanitizedError as Record<string, unknown> | undefined;
+
+      const sanitizedMsg =
+        (errorObj?.userMessage as string) ||
+        incomingHeaders["x-zyka-sanitized-error"] ||
+        "An error occurred during generation.";
+
+      const cleanErr: SanitizedErrorDetail = {
+        userMessage: sanitizedMsg,
+        category: getSafeCategory(errorObj?.category || incomingHeaders["x-zyka-error-category"]),
+        actionableTip:
+          (errorObj?.actionableTip as string) || "Please review your prompt.",
+        suggestedService: errorObj?.suggestedService as "image" | "video" | "voice" | undefined,
+        suggestedRatio: errorObj?.suggestedRatio as AspectRatio | undefined,
+        suggestedDuration: errorObj?.suggestedDuration as Duration | undefined,
+        actionLabel: errorObj?.actionLabel as string | undefined,
+      };
+
+      const rawErr: UpstreamErrorDetail = {
+        code: incomingHeaders["x-zyka-error-code"] || "ERR_GATEWAY",
+        technicalMessage: `Request failed with HTTP ${res.status}. TraceID: ${traceId}`,
+        upstreamService: "Zyka-Gateway",
+        traceId,
+      };
+
+      setRawError(rawErr);
+      setSanitizedError(cleanErr);
+      setError(cleanErr.userMessage);
+
+      recordOperationLog({
+        type: res.status === 429 ? "RATE_LIMIT_ENGAGED" : "ERROR_INTERCEPTED",
+        status: "ERROR",
+        statusCode: res.status,
+        realIp: activeRealIp,
+        ipType: ipSource,
+        username,
+        mediaType: payload.mediaType,
+        promptSnippet: payload.prompt,
+        summary: cleanErr.userMessage,
+        technicalDetails: rawErr.technicalMessage,
+        sanitizedMessage: cleanErr.userMessage,
+        actionableTip: cleanErr.actionableTip,
+      });
+    } else {
+      const dataObj = json.data as Record<string, unknown> | undefined;
+      setResult({
+        mediaUrl: dataObj?.mediaUrl as string | undefined,
+        mediaType: dataObj?.mediaType as MediaType | undefined,
+        duration: dataObj?.duration as Duration | undefined,
+        aspectRatio: dataObj?.aspectRatio as AspectRatio | undefined,
+        resolution: dataObj?.resolution as string | undefined,
+        model: dataObj?.model as string | undefined,
+        quality: dataObj?.quality as string | undefined,
+        prompt: payload.prompt,
+      });
+
+      recordOperationLog({
+        type: "GENERATION_SUCCESS",
+        status: "SUCCESS",
+        statusCode: 200,
+        realIp: activeRealIp,
+        ipType: ipSource,
+        username,
+        mediaType: payload.mediaType,
+        promptSnippet: payload.prompt,
+        summary: `Successfully synthesized ${payload.mediaType.toUpperCase()} artifact (200 OK)`,
+      });
+    }
+    setIsLoading(false);
   };
 
   return (
@@ -362,6 +453,7 @@ export default function Home() {
             <PromptForm
               onSubmit={handleGenerate}
               isLoading={isLoading}
+              cooldownSeconds={cooldownSeconds}
               selectedMediaType={selectedMediaType}
               setSelectedMediaType={setSelectedMediaType}
               aspectRatio={aspectRatio}

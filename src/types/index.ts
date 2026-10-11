@@ -1,4 +1,4 @@
-export type MediaType = "image" | "video" | "voice" | "audio";
+export type MediaType = "image" | "video" | "voice";
 export type AspectRatio = "1:1" | "16:9" | "9:16" | "4:3" | "21:9";
 export type Duration = "2s" | "5s" | "10s" | "15s" | "30s";
 
@@ -30,7 +30,9 @@ export interface SanitizedErrorDetail {
     | "RATE_LIMIT"
     | "VALIDATION"
     | "SAFETY"
-    | "SYSTEM";
+    | "SYSTEM"
+    | "TIMEOUT"
+    | "AUTHENTICATION";
   actionableTip: string;
   suggestedService?: "image" | "video" | "voice";
   suggestedRatio?: AspectRatio;

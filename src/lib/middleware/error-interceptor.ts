@@ -4,6 +4,7 @@ import {
   ALLOWED_UPSTREAM_HEADERS,
   MAX_TOTAL_HEADERS_BYTES,
   normalizeStatusCode,
+  normalizeErrorStatus,
   normalizeHeaders,
   sanitizeHeaderValue,
   generateSecureTraceId,
@@ -42,8 +43,8 @@ export function interceptAndTranslateUpstreamError(
   upstreamHeaders: unknown,
   errorPayload?: unknown
 ): ErrorTranslationResult {
-  // Step 1: Input Normalization & Sanity Checks
-  const validStatus = normalizeStatusCode(upstreamStatus);
+  // Step 1: Input Normalization & Sanity Checks (E1: errors must be 4xx/5xx)
+  const validStatus = normalizeErrorStatus(upstreamStatus);
   const normalizedHeaders = normalizeHeaders(upstreamHeaders);
 
   const safePayload =

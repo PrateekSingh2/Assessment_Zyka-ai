@@ -184,15 +184,51 @@ export interface LogFilters {
 let hasHydrated = false;
 
 /**
- * Returns filtered logs from the in-memory ring buffer.
- * If empty on initial request, awaits disk hydration.
+ * Returns filtered logs merged from disk JSONL tail and in-memory ring buffer (E6).
+ * Reads the actual persistent log file on disk so proxy.ts rate-limit 429s and route errors
+ * are both reported consistently.
  */
 export async function getServerLogs(filters?: LogFilters): Promise<ServerErrorLogEntry[]> {
-  if (!hasHydrated && inMemoryLogs.length === 0) {
-    await hydrateLogsFromDisk();
+  const fs = getFs();
+  const diskLogs: ServerErrorLogEntry[] = [];
+
+  if (fs) {
+    try {
+      const content = await fs.promises.readFile(JSONL_LOG_FILE, "utf8");
+      const lines = content.trim().split("\n").filter(Boolean);
+      const recentLines = lines.slice(-MAX_IN_MEMORY_LOGS);
+      for (const line of recentLines) {
+        try {
+          diskLogs.push(JSON.parse(line) as ServerErrorLogEntry);
+        } catch {}
+      }
+    } catch {}
   }
 
-  let result = [...inMemoryLogs];
+  // Merge disk logs and inMemoryLogs, de-duplicating by logId / traceId
+  const seen = new Set<string>();
+  const combined: ServerErrorLogEntry[] = [];
+
+  for (const entry of inMemoryLogs) {
+    const key = entry.logId || entry.traceId;
+    if (key && !seen.has(key)) {
+      seen.add(key);
+      combined.push(entry);
+    }
+  }
+
+  for (const entry of diskLogs.reverse()) {
+    const key = entry.logId || entry.traceId;
+    if (key && !seen.has(key)) {
+      seen.add(key);
+      combined.push(entry);
+    }
+  }
+
+  // Sort by epochMs descending
+  combined.sort((a, b) => (b.epochMs || 0) - (a.epochMs || 0));
+
+  let result = combined;
 
   if (filters?.ip) {
     const needle = filters.ip.toLowerCase();

@@ -29,6 +29,7 @@ import {
 interface PromptFormProps {
   onSubmit: (payload: GenerationRequestPayload) => void;
   isLoading: boolean;
+  cooldownSeconds?: number;
   selectedMediaType: MediaType;
   setSelectedMediaType: (type: MediaType) => void;
   aspectRatio: AspectRatio;
@@ -152,34 +153,6 @@ const MODEL_DATA: Record<MediaType, ModelOption[]> = {
       name: "DeepVoice Neural",
       badge: "Ultra Fast",
       description: "Conversational latency with natural inflection",
-    },
-  ],
-  audio: [
-    {
-      id: "Auto (Best model)",
-      name: "Auto (Best model)",
-      badge: "Smart Auto",
-      description: "Optimizes audio timbre and pacing for prompt",
-      isPopular: true,
-    },
-    {
-      id: "Zyka Voice v2 (Studio)",
-      name: "Zyka Voice v2",
-      badge: "Studio HQ",
-      description: "Expressive neural audio with acoustic mastering",
-      isPopular: true,
-    },
-    {
-      id: "ElevenLabs Multilingual",
-      name: "ElevenLabs",
-      badge: "30+ Langs",
-      description: "World-class natural audio and voice synthesis",
-    },
-    {
-      id: "DeepVoice Neural",
-      name: "DeepVoice Neural",
-      badge: "Ultra Fast",
-      description: "Conversational latency with natural audio generation",
     },
   ],
 };
@@ -307,6 +280,7 @@ const QUALITY_DATA: QualityOption[] = [
 export function PromptForm({
   onSubmit,
   isLoading,
+  cooldownSeconds = 0,
   selectedMediaType,
   setSelectedMediaType,
   aspectRatio,
@@ -916,16 +890,22 @@ export function PromptForm({
           {/* Right Action Button: Pink/Fuchsia Pill matching mockup */}
           <button
             type="submit"
-            disabled={isLoading || !trimmed}
+            disabled={isLoading || !trimmed || cooldownSeconds > 0}
             className={cn(
-              "flex items-center space-x-1.5 px-6 py-2.5 rounded-full text-xs sm:text-sm font-semibold transition-all cursor-pointer shadow-md",
-              isLoading || !trimmed
+              "flex items-center space-x-1.5 px-6 py-2.5 rounded-full text-xs sm:text-sm font-semibold transition-all shadow-md",
+              isLoading || !trimmed || cooldownSeconds > 0
                 ? "bg-slate-200 text-slate-400 cursor-not-allowed shadow-none"
-                : "bg-gradient-to-r from-[#db2777] to-[#e11d48] hover:from-[#be185d] hover:to-[#be123c] text-white shadow-pink-500/25 active:scale-98"
+                : "bg-gradient-to-r from-[#db2777] to-[#e11d48] hover:from-[#be185d] hover:to-[#be123c] text-white shadow-pink-500/25 active:scale-98 cursor-pointer"
             )}
           >
             <Sparkles className="w-4 h-4" />
-            <span>{isLoading ? "Generating..." : "Generate"}</span>
+            <span>
+              {isLoading
+                ? "Generating..."
+                : cooldownSeconds > 0
+                ? `Wait ${cooldownSeconds}s`
+                : "Generate"}
+            </span>
             <ArrowRight className="w-4 h-4 ml-0.5" />
           </button>
         </div>

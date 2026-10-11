@@ -83,13 +83,33 @@ export function proxy(request: NextRequest) {
     } catch (ipErr: unknown) {
       if (ipErr instanceof UntrustedOriginError) {
         const traceId = generateSecureTraceId();
-        return buildErrorResponse(
-          400,
+        recordServerError({
+          resolvedIp: "0.0.0.0",
+          ipSource: "remote-addr-fallback",
+          resolvedUserId: "usr_anon_untrusted",
+          userAgent: cleanedHeaders.get("user-agent") ?? "unknown-client",
+          statusCode: 403,
+          errorCode: "ERR_UNTRUSTED_ORIGIN",
+          category: "SYSTEM",
+          rawTechnicalMessage: "Request origin rejected: Untrusted proxy topology or direct server bypass attempt",
+          sanitizedUserMessage: "Access denied. Request must originate from an authorized gateway.",
+          actionableTip: "Please ensure your connection originates from an authorized network.",
+          upstreamService: "Zyka-Edge-Proxy-Gateway",
+          route: pathname,
+          method: request.method,
           traceId,
-          "Untrusted origin: Request did not traverse the configured gateway proxy.",
-          "Ensure your request is routed through the official edge proxy.",
-          "VALIDATION",
-          { "x-zyka-middleware-processed": "true" }
+        });
+        return buildErrorResponse(
+          403,
+          traceId,
+          "Access denied. Request must originate from an authorized gateway.",
+          "Please ensure your connection originates from an authorized network.",
+          "SYSTEM",
+          {
+            "x-zyka-middleware-processed": "true",
+            "x-zyka-trace-id": traceId,
+            "x-zyka-error-code": "ERR_UNTRUSTED_ORIGIN",
+          }
         );
       }
       throw ipErr;
@@ -103,6 +123,22 @@ export function proxy(request: NextRequest) {
       // For /api/generate: enforce POST method check BEFORE rate limit consumption
       if (pathname.startsWith("/api/generate") && request.method !== "POST") {
         const traceId = generateSecureTraceId();
+        recordServerError({
+          resolvedIp: realClientIp,
+          ipSource,
+          resolvedUserId,
+          userAgent,
+          statusCode: 405,
+          errorCode: "ERR_METHOD_NOT_ALLOWED",
+          category: "SYSTEM",
+          rawTechnicalMessage: `HTTP 405: ${request.method} method not allowed on /api/generate`,
+          sanitizedUserMessage: "Method Not Allowed. Only POST requests are accepted.",
+          actionableTip: "Send a POST request with a JSON prompt payload.",
+          upstreamService: "Zyka-Edge-Proxy-Gateway",
+          route: pathname,
+          method: request.method,
+          traceId,
+        });
         return buildErrorResponse(
           405,
           traceId,
@@ -122,6 +158,22 @@ export function proxy(request: NextRequest) {
       // For /api/logs: enforce GET method check BEFORE rate limit consumption
       if (pathname.startsWith("/api/logs") && request.method !== "GET") {
         const traceId = generateSecureTraceId();
+        recordServerError({
+          resolvedIp: realClientIp,
+          ipSource,
+          resolvedUserId,
+          userAgent,
+          statusCode: 405,
+          errorCode: "ERR_METHOD_NOT_ALLOWED",
+          category: "SYSTEM",
+          rawTechnicalMessage: `HTTP 405: ${request.method} method not allowed on /api/logs`,
+          sanitizedUserMessage: "Method Not Allowed. Only GET requests are accepted.",
+          actionableTip: "Send a GET request to query server logs.",
+          upstreamService: "Zyka-Edge-Proxy-Gateway",
+          route: pathname,
+          method: request.method,
+          traceId,
+        });
         return buildErrorResponse(
           405,
           traceId,
@@ -246,15 +298,32 @@ export function proxy(request: NextRequest) {
 
     return NextResponse.next({ request: { headers: cleanedHeaders } });
   } catch (err: unknown) {
-    console.error("[proxy] Error:", err instanceof Error ? err.message : err);
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    console.error("[proxy] Error:", errorMsg);
     const traceId = generateSecureTraceId();
+    recordServerError({
+      resolvedIp: "127.0.0.1",
+      ipSource: "remote-addr-fallback",
+      resolvedUserId: "usr_anon_system",
+      userAgent: request.headers.get("user-agent") ?? "unknown-client",
+      statusCode: 500,
+      errorCode: "ERR_PROXY_INTERNAL_FAULT",
+      category: "SYSTEM",
+      rawTechnicalMessage: `Proxy unhandled exception: ${errorMsg}`,
+      sanitizedUserMessage: "Internal gateway error.",
+      actionableTip: "Please retry shortly.",
+      upstreamService: "Zyka-Edge-Proxy-Gateway",
+      route: pathname,
+      method: request.method,
+      traceId,
+    });
     return buildErrorResponse(
       500,
       traceId,
       "Internal gateway error.",
       "Please retry shortly.",
       "SYSTEM",
-      { "x-zyka-middleware-processed": "true" }
+      { "x-zyka-middleware-processed": "true", "x-zyka-trace-id": traceId }
     );
   }
 }

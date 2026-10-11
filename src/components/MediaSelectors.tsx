@@ -23,10 +23,10 @@ export function MediaSelectors({
   setAspectRatio,
   disabled,
 }: MediaSelectorsProps) {
-  const mediaTypes: { type: MediaType; label: string; icon: any }[] = [
+  const mediaTypes: { type: MediaType; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
     { type: "image", label: "Image", icon: Image },
     { type: "video", label: "Video", icon: Video },
-    { type: "audio", label: "Audio", icon: Music },
+    { type: "voice", label: "Voice", icon: Music },
   ];
 
   const durations: Duration[] = ["2s", "5s", "10s", "15s", "30s"];
@@ -86,14 +86,14 @@ export function MediaSelectors({
       <div
         className={cn(
           "flex items-center space-x-1.5 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200 text-xs transition-opacity",
-          mediaType === "audio" ? "opacity-30 pointer-events-none" : "opacity-100"
+          mediaType === "voice" ? "opacity-30 pointer-events-none" : "opacity-100"
         )}
       >
         <Ratio className="w-3.5 h-3.5 text-slate-400" />
         <span className="text-slate-500 font-medium">Ratio:</span>
         <select
           value={aspectRatio}
-          disabled={disabled || mediaType === "audio"}
+          disabled={disabled || mediaType === "voice"}
           onChange={(e) => setAspectRatio(e.target.value as AspectRatio)}
           aria-label="Aspect Ratio"
           className="bg-transparent font-medium text-slate-800 focus:outline-none cursor-pointer"

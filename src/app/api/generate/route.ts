@@ -27,6 +27,8 @@ import {
   GenerateBody,
   PayloadTooLargeError,
   MalformedJsonError,
+  RequestTimeoutError,
+  toUserMessage,
 } from "@/lib/request-schema";
 import { recordServerError } from "@/lib/server-logger";
 import type { ServerErrorLogEntry } from "@/types";
@@ -99,7 +101,38 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
   try {
     // ------------------------------------------------------------------
-    // 1. Bounded body read (throws PayloadTooLargeError / MalformedJsonError)
+    // 0. Content-Type Header Verification (E7)
+    // ------------------------------------------------------------------
+    const contentType = req.headers.get("content-type") ?? "";
+    if (!contentType.toLowerCase().startsWith("application/json")) {
+      recordServerError({
+        ...identity,
+        statusCode: 415,
+        errorCode: "ERR_UNSUPPORTED_MEDIA_TYPE",
+        category: "FORMAT",
+        rawTechnicalMessage: `Invalid Content-Type header: '${contentType}'. Expected application/json.`,
+        sanitizedUserMessage: "Unsupported media format requested. Only application/json is accepted.",
+        actionableTip: "Send your request with Content-Type: application/json.",
+        route: "/api/generate",
+        method: "POST",
+        traceId,
+      });
+      const headers = new Headers();
+      headers.set("x-zyka-sanitized-error", "Unsupported media format requested. Only application/json is accepted.");
+      headers.set("x-zyka-error-code", "ERR_UNSUPPORTED_MEDIA_TYPE");
+      headers.set("x-zyka-middleware-processed", "true");
+      headers.set("x-zyka-trace-id", traceId);
+      headers.set("x-zyka-resolved-ip", identity.resolvedIp);
+      headers.set("x-zyka-resolved-ip-source", identity.ipSource);
+      headers.set("x-zyka-resolved-user-id", identity.resolvedUserId);
+      return NextResponse.json(
+        publicErrorBody(415, traceId, "Unsupported media format requested. Only application/json is accepted.", "Send your request with Content-Type: application/json.", "FORMAT"),
+        { status: 415, headers }
+      );
+    }
+
+    // ------------------------------------------------------------------
+    // 1. Bounded body read (throws PayloadTooLargeError / RequestTimeoutError / MalformedJsonError)
     // ------------------------------------------------------------------
     let rawBody: unknown;
     try {
@@ -111,9 +144,9 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
           statusCode: 413,
           errorCode: "ERR_PAYLOAD_TOO_LARGE",
           category: "VALIDATION",
-          rawTechnicalMessage: "Request body exceeded 16 KB limit",
+          rawTechnicalMessage: "Request body exceeded 32 KB limit",
           sanitizedUserMessage: "Your request is too large. Please shorten your prompt.",
-          actionableTip: "Keep your prompt under 8,000 characters.",
+          actionableTip: "Keep request body size under 32 KB.",
           route: "/api/generate",
           method: "POST",
           traceId,
@@ -127,11 +160,49 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
         headers.set("x-zyka-resolved-ip-source", identity.ipSource);
         headers.set("x-zyka-resolved-user-id", identity.resolvedUserId);
         return NextResponse.json(
-          publicErrorBody(413, traceId, "Your request is too large. Please shorten your prompt.", "Keep your prompt under 8,000 characters.", "VALIDATION"),
+          publicErrorBody(413, traceId, "Your request is too large. Please shorten your prompt.", "Keep request body size under 32 KB.", "VALIDATION"),
           { status: 413, headers }
         );
       }
+      if (e instanceof RequestTimeoutError) {
+        recordServerError({
+          ...identity,
+          statusCode: 408,
+          errorCode: "ERR_REQUEST_TIMEOUT",
+          category: "TIMEOUT",
+          rawTechnicalMessage: "Request body read timed out after 5,000ms",
+          sanitizedUserMessage: "Request timed out while waiting for body data.",
+          actionableTip: "Ensure your client connection sends request payload promptly.",
+          route: "/api/generate",
+          method: "POST",
+          traceId,
+        });
+        const headers = new Headers();
+        headers.set("x-zyka-sanitized-error", "Request timed out while waiting for body data.");
+        headers.set("x-zyka-error-code", "ERR_REQUEST_TIMEOUT");
+        headers.set("x-zyka-middleware-processed", "true");
+        headers.set("x-zyka-trace-id", traceId);
+        headers.set("x-zyka-resolved-ip", identity.resolvedIp);
+        headers.set("x-zyka-resolved-ip-source", identity.ipSource);
+        headers.set("x-zyka-resolved-user-id", identity.resolvedUserId);
+        return NextResponse.json(
+          publicErrorBody(408, traceId, "Request timed out while waiting for body data.", "Ensure your client connection sends request payload promptly.", "TIMEOUT"),
+          { status: 408, headers }
+        );
+      }
       if (e instanceof MalformedJsonError) {
+        recordServerError({
+          ...identity,
+          statusCode: 400,
+          errorCode: "ERR_MALFORMED_JSON",
+          category: "VALIDATION",
+          rawTechnicalMessage: "JSON parsing failed on request body",
+          sanitizedUserMessage: "Invalid JSON body.",
+          actionableTip: "Send a valid JSON object with a prompt field.",
+          route: "/api/generate",
+          method: "POST",
+          traceId,
+        });
         const headers = new Headers();
         headers.set("x-zyka-sanitized-error", "Invalid JSON body.");
         headers.set("x-zyka-error-code", "ERR_MALFORMED_JSON");
@@ -149,27 +220,26 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     // ------------------------------------------------------------------
-    // 2. Zod schema validation — strict typing, no any, no blind casts
+    // 2. Zod schema validation — strict typing, no any, no blind casts (E4)
     // ------------------------------------------------------------------
     const parsed = GenerateBody.safeParse(rawBody);
     if (!parsed.success) {
       const firstIssue = parsed.error.issues[0];
-      const field = firstIssue?.path.join(".") ?? "input";
-      const detail = firstIssue?.message ?? "Validation failed";
+      const userMessage = toUserMessage(firstIssue);
       recordServerError({
         ...identity,
-        statusCode: 422,
+        statusCode: 400,
         errorCode: "ERR_SCHEMA_VALIDATION",
         category: "VALIDATION",
         rawTechnicalMessage: `Schema validation failed: ${parsed.error.message}`,
-        sanitizedUserMessage: `Invalid ${field}: ${detail}`,
+        sanitizedUserMessage: userMessage,
         actionableTip: "Check your prompt and parameters.",
         route: "/api/generate",
         method: "POST",
         traceId,
       });
       const headers = new Headers();
-      headers.set("x-zyka-sanitized-error", sanitizeHeaderValue(`Invalid ${field}: ${detail}`));
+      headers.set("x-zyka-sanitized-error", sanitizeHeaderValue(userMessage));
       headers.set("x-zyka-error-code", "ERR_SCHEMA_VALIDATION");
       headers.set("x-zyka-middleware-processed", "true");
       headers.set("x-zyka-trace-id", traceId);
@@ -177,8 +247,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       headers.set("x-zyka-resolved-ip-source", identity.ipSource);
       headers.set("x-zyka-resolved-user-id", identity.resolvedUserId);
       return NextResponse.json(
-        publicErrorBody(422, traceId, `Invalid ${field}: ${detail}`, "Check your prompt and parameters.", "VALIDATION"),
-        { status: 422, headers }
+        publicErrorBody(400, traceId, userMessage, "Check your prompt and parameters.", "VALIDATION"),
+        { status: 400, headers }
       );
     }
 
@@ -288,6 +358,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       { status: 200, headers: successHeaders }
     );
   } catch (unexpectedError: unknown) {
+    // Gracefully handle client connection aborts / ECONNRESET without noisy server dumps (E10)
+    if (
+      unexpectedError instanceof Error &&
+      (unexpectedError.name === "AbortError" ||
+        (unexpectedError as { code?: string }).code === "ECONNRESET")
+    ) {
+      return new NextResponse(null, { status: 499 });
+    }
+
     // ------------------------------------------------------------------
     // Top-level crash handler — log server-side, return opaque 500
     // ------------------------------------------------------------------

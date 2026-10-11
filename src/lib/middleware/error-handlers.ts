@@ -71,12 +71,19 @@ export function handleFallbackStatusCodes(
         actionableTip:
           "Ensure your prompt is properly formatted and non-empty before generating.",
       },
-      422: {
+      401: {
         userMessage:
-          "The request could not be processed due to semantic parameter constraints.",
+          "Authentication required to access this service.",
+        category: "AUTHENTICATION",
+        actionableTip:
+          "Please provide valid authentication credentials or an API token.",
+      },
+      403: {
+        userMessage:
+          "Access to the requested generation capability is restricted.",
         category: "VALIDATION",
         actionableTip:
-          "Adjust your generation settings or prompt to match supported model parameters.",
+          "Verify your account permissions or choose a standard generation model.",
       },
       404: {
         userMessage:
@@ -85,12 +92,54 @@ export function handleFallbackStatusCodes(
         actionableTip:
           "Select a currently available AI model engine from the model dropdown.",
       },
-      403: {
+      405: {
         userMessage:
-          "Access to the requested generation capability is restricted.",
+          "Method Not Allowed. The requested HTTP method is not supported for this route.",
+        category: "SYSTEM",
+        actionableTip:
+          "Ensure your request uses the correct HTTP method (e.g. POST for generation, GET for logs).",
+      },
+      408: {
+        userMessage:
+          "Request timed out while waiting for a response.",
+        category: "TIMEOUT",
+        actionableTip:
+          "The connection took too long to complete. Please check your connection and retry.",
+      },
+      413: {
+        userMessage:
+          "Your request is too large. Please shorten your prompt or reduce input size.",
         category: "VALIDATION",
         actionableTip:
-          "Verify your account permissions or choose a standard generation model.",
+          "Keep request body size under 32 KB.",
+      },
+      415: {
+        userMessage:
+          "Unsupported media format requested. Only Image, Video, and Voice generations are supported.",
+        category: "FORMAT",
+        actionableTip:
+          "Select a supported media type: Image, Video, or Voice.",
+      },
+      422: {
+        userMessage:
+          "The request could not be processed due to semantic parameter constraints.",
+        category: "VALIDATION",
+        actionableTip:
+          "Adjust your generation settings or prompt to match supported model parameters.",
+      },
+      429: {
+        userMessage:
+          "Too many requests. Please wait a moment before trying again.",
+        category: "RATE_LIMIT",
+        actionableTip:
+          "You have exceeded the request rate limit. Please wait a moment before submitting another request.",
+      },
+      451: {
+        userMessage:
+          "Generation request blocked due to legal or policy restrictions.",
+        category: "SAFETY",
+        actionableTip:
+          "Ensure your creative prompt complies with our content guidelines and terms of service.",
       },
     };
 

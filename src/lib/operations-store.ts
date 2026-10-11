@@ -10,8 +10,8 @@ function getStorage(): Storage | null {
   if (typeof window !== "undefined" && window.localStorage) {
     return window.localStorage;
   }
-  if (typeof globalThis !== "undefined" && (globalThis as any).localStorage) {
-    return (globalThis as any).localStorage;
+  if (typeof globalThis !== "undefined" && (globalThis as { localStorage?: Storage }).localStorage) {
+    return (globalThis as { localStorage?: Storage }).localStorage ?? null;
   }
   return null;
 }

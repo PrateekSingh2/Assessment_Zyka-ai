@@ -17,7 +17,7 @@ import { cn } from "@/lib/utils";
 interface InternalsInspectorProps {
   requestHeaders: Record<string, string>;
   responseHeaders: Record<string, string>;
-  responsePayload: any;
+  responsePayload: unknown;
   rawError?: UpstreamErrorDetail | null;
   sanitizedError?: SanitizedErrorDetail | null;
   statusCode?: number | null;
@@ -68,9 +68,21 @@ export function InternalsInspector({
     ip.startsWith("127.") ||
     ip === "::ffff:127.0.0.1";
 
+  const payloadRecord =
+    typeof responsePayload === "object" && responsePayload !== null
+      ? (responsePayload as {
+          serverLog?: {
+            clientIp?: string;
+            ipSource?: string;
+            userId?: string;
+            [key: string]: unknown;
+          };
+        })
+      : null;
+
   const rawClientIp =
     responseHeaders["x-zyka-resolved-ip"] ||
-    responsePayload?.serverLog?.clientIp ||
+    payloadRecord?.serverLog?.clientIp ||
     responseHeaders["x-zyka-real-ip"] ||
     requestHeaders["x-zyka-real-ip"] ||
     requestHeaders["x-zyka-client-public-ip"] ||
@@ -86,17 +98,17 @@ export function InternalsInspector({
 
   const ipSource =
     responseHeaders["x-zyka-resolved-ip-source"] ||
-    responsePayload?.serverLog?.ipSource ||
+    payloadRecord?.serverLog?.ipSource ||
     responseHeaders["x-zyka-ip-source"] ||
     (realClientIp && isLoopback(rawClientIp) ? "client-public-wan" : (realClientIp ? "gateway-verified" : null));
 
   const resolvedUserId =
     responseHeaders["x-zyka-resolved-user-id"] ||
-    responsePayload?.serverLog?.userId ||
+    payloadRecord?.serverLog?.userId ||
     responseHeaders["x-zyka-user-id"] ||
     requestHeaders["x-zyka-user-id"] ||
     null;
-  const serverLogData = responsePayload?.serverLog || null;
+  const serverLogData = payloadRecord?.serverLog || null;
   const serverLogJson = serverLogData
     ? JSON.stringify(serverLogData, null, 2)
     : "";

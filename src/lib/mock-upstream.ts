@@ -37,7 +37,7 @@ export async function executeMockUpstreamAI(params: {
   const { prompt, mediaType, duration, aspectRatio, model, quality } = params;
   const traceId = `trace-${globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : Math.random().toString(36).substring(2, 10)}`;
   const trimmed = prompt.trim();
-  const normalizedType = mediaType === "voice" || mediaType === "audio" ? "voice" : mediaType;
+  const normalizedType = mediaType;
 
   // 1. Edge Case: Empty Prompt
   if (!trimmed) {

@@ -185,6 +185,20 @@ export function normalizeStatusCode(status: unknown): number {
 }
 
 /**
+ * ZERO-TRUST STATUS NORMALIZATION FOR ERRORS (E1):
+ * An *error* response must be 4xx or 5xx.
+ * Web Response constructors crash on 1xx, 204, 205, 304, and returning 2xx for an error
+ * tricks clients and health monitors into treating failure as success.
+ * Any non-4xx/5xx status in an error translation context is normalized to 502 Bad Gateway.
+ */
+export function normalizeErrorStatus(status: unknown): number {
+  if (status === null || status === undefined) return 500;
+  const n = typeof status === "number" ? status : Number(status);
+  if (!Number.isInteger(n) || Number.isNaN(n)) return 500;
+  return n >= 400 && n <= 599 ? n : 502;
+}
+
+/**
  * Null/Malformed Input Resilience & Header Case-Insensitivity:
  * Canonicalizes header keys to lowercase and drops dangerous prototype keys.
  */

@@ -79,7 +79,7 @@ export function GenerationResult({
         <div className="flex items-center space-x-2">
           <span className="font-semibold text-slate-700 capitalize flex items-center space-x-1.5">
             {mediaType === "video" && <Film className="w-3.5 h-3.5 text-blue-600" />}
-            {(mediaType === "audio" || mediaType === "voice") && <Volume2 className="w-3.5 h-3.5 text-blue-600" />}
+            {mediaType === "voice" && <Volume2 className="w-3.5 h-3.5 text-blue-600" />}
             {mediaType === "image" && <Sparkles className="w-3.5 h-3.5 text-blue-600" />}
             <span>{mediaType} Generated</span>
           </span>
@@ -124,7 +124,7 @@ export function GenerationResult({
           </div>
         )}
 
-        {(mediaType === "audio" || mediaType === "voice") && (
+        {mediaType === "voice" && (
           <div className="w-full p-8 flex flex-col items-center justify-center space-y-5">
             {/* Audio Wave Visualizer */}
             <div className="flex items-center justify-center space-x-1.5 h-16 w-full max-w-sm">
