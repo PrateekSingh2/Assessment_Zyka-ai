@@ -72,8 +72,10 @@ export function interceptAndTranslateUpstreamError(
     (typeof safePayload?.upstreamService === "string" ? safePayload.upstreamService : "") ||
     "Zyka-Upstream-Gateway";
 
-  // Step 3: Strategy Pattern Lookup (O(1) Execution)
-  const handler: ErrorHandlerFn | undefined = ErrorHandlers[errorCode];
+  // Step 3: Strategy Pattern Lookup (O(1) Execution with Prototype Protection)
+  const isOwnHandler = Object.prototype.hasOwnProperty.call(ErrorHandlers, errorCode);
+  const handler: ErrorHandlerFn | undefined = isOwnHandler ? ErrorHandlers[errorCode] : undefined;
+
   const strategyResult = handler
     ? handler(safePayload, normalizedHeaders, rawTechnicalMessage)
     : handleFallbackStatusCodes(validStatus);

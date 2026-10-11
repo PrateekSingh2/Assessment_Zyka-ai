@@ -295,6 +295,24 @@ async function main() {
   assert(tid.startsWith("trace-") && tid.length > 20, `Secure trace ID generated`);
 
   // --------------------------------------------------------------------------
+  // TEST: Prototype-Safe Strategy Dispatch (toString, valueOf, constructor)
+  // --------------------------------------------------------------------------
+  console.log(`\n[VERIFICATION] Prototype-Safe Strategy Dispatch`);
+
+  for (const protoKey of ["toString", "valueOf", "constructor", "__proto__"]) {
+    try {
+      const res = interceptAndTranslateUpstreamError(500, {}, { code: protoKey });
+      assert(
+        res.sanitizedError.category === "SYSTEM" &&
+        res.sanitizedError.userMessage.includes("AI generation service"),
+        `Prototype key '${protoKey}' safely fell back without TypeError crash`
+      );
+    } catch (err) {
+      assert(false, `Prototype key '${protoKey}' crashed with: ${err.message}`);
+    }
+  }
+
+  // --------------------------------------------------------------------------
   // SUMMARY
   // --------------------------------------------------------------------------
   console.log(`\n========================================================================`);

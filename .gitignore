@@ -46,3 +46,6 @@ next-env.d.ts
 logs.txt
 *.jsonl
 
+/src/lib/middleware/error-handlers.txt
+/src/lib/middleware/error-utils.txt
+/src/lib/middleware/error-interceptor.txt
