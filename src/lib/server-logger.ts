@@ -282,13 +282,8 @@ export function recordServerError(
   const userId = resolveUserIdentifier(params.headers, ip, userAgent);
   const secureUuid = () => {
     try {
-      if (typeof globalThis !== "undefined" && globalThis.crypto?.randomUUID) {
-        return globalThis.crypto.randomUUID();
-      }
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const nodeCrypto = require("crypto");
-      if (nodeCrypto.randomUUID) {
-        return nodeCrypto.randomUUID();
+      if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+        return crypto.randomUUID();
       }
     } catch {}
     return `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;

@@ -32,12 +32,70 @@ export interface UpstreamErrorPayload {
 }
 
 const MAX_HEADER_VALUE_LENGTH = 1000;
+const MAX_TOTAL_HEADERS_BYTES = 4096;
 
 /**
- * Sanitizes header values for safe HTTP transport:
- * 1. Safe JSON serialization for objects/arrays (prevents "[object Object]" pollution)
- * 2. Replaces CR/LF newlines with " | " to prevent HTTP response splitting
- * 3. Enforces strict upper-bound character length (1,000 chars) to prevent HTTP 431 Request Header Fields Too Large crashes
+ * Allowlist of permissible upstream headers forwarded through the proxy layer.
+ * Prevents upstream header stuffing attacks and cumulative 431 proxy crashes.
+ */
+const ALLOWED_UPSTREAM_HEADERS = new Set([
+  "x-upstream-error-code",
+  "x-upstream-service",
+  "x-upstream-trace-id",
+  "x-ratelimit-limit",
+  "x-ratelimit-remaining",
+  "x-ratelimit-reset",
+  "retry-after",
+  "x-invalid-ratio",
+  "x-upstream-invalid-ratio",
+  "x-conflicting-prompt-ratio",
+  "x-upstream-conflicting-ratio",
+  "x-selected-dropdown-ratio",
+  "x-upstream-selected-ratio",
+  "x-conflicting-prompt-duration",
+  "x-upstream-conflicting-duration",
+  "x-selected-dropdown-duration",
+  "x-upstream-selected-duration",
+]);
+
+/**
+ * Safely performs bounded, shallow serialization of an object without
+ * deep recursive traversal. Protects the Node.js event loop from DoS attacks
+ * involving massive (50MB+) or circular upstream payloads.
+ */
+function safeShallowSerialize(obj: object): string {
+  try {
+    if (Array.isArray(obj)) {
+      const items = obj.slice(0, 10).map((item) => {
+        if (item === null) return "null";
+        if (typeof item === "object") return "[Nested]";
+        return String(item).substring(0, 50);
+      });
+      return `[${items.join(",")}]`;
+    }
+    const keys = Object.keys(obj).slice(0, 10);
+    const entries = keys.map((key) => {
+      const v = (obj as Record<string, unknown>)[key];
+      const formattedVal =
+        v === null
+          ? "null"
+          : typeof v === "object"
+          ? "[Nested]"
+          : JSON.stringify(String(v).substring(0, 50));
+      return `${JSON.stringify(key)}:${formattedVal}`;
+    });
+    return `{${entries.join(",")}}`;
+  } catch {
+    return "[Object]";
+  }
+}
+
+/**
+ * Sanitizes header values for safe, spec-compliant HTTP transport:
+ * 1. Prevents Event Loop DoS: Bounded shallow serialization for objects (never deep JSON.stringify)
+ * 2. Prevents HTTP Response Splitting: Converts CR/LF newlines to " | "
+ * 3. Prevents ERR_INVALID_CHAR Crashes: Strips non-ASCII/control characters outside latin1/printable ASCII (0x20-0x7E)
+ * 4. Prevents 431 Request Header Too Large: Enforces strict per-header length limit (default 1,000 chars)
  */
 export function sanitizeHeaderValue(
   val: unknown,
@@ -45,39 +103,32 @@ export function sanitizeHeaderValue(
 ): string {
   if (val === null || val === undefined) return "";
 
-  let stringified: string;
+  let rawString: string;
   if (typeof val === "object") {
-    try {
-      stringified = JSON.stringify(val);
-    } catch {
-      stringified = String(val);
-    }
+    rawString = safeShallowSerialize(val);
   } else {
-    stringified = String(val);
+    rawString = String(val);
   }
 
-  return stringified
+  return rawString
     .replace(/[\r\n]+/g, " | ")
+    .replace(/[^\x20-\x7E]/g, "") // Enforce strict 7-bit ASCII (0x20-0x7E) to prevent Node ERR_INVALID_CHAR crashes
     .trim()
     .substring(0, maxLength);
 }
 
 /**
- * Generates an RFC 4122 compliant collision-resistant trace ID using crypto.randomUUID()
- * Safe for high-concurrency environments under 100+ concurrent requests.
+ * Generates an RFC 4122 compliant collision-resistant trace ID.
+ * Uses Web Crypto API (crypto.randomUUID()) natively supported across
+ * both Node.js (v18+) and Next.js Edge runtimes without dynamic require() calls.
  */
 export function generateSecureTraceId(): string {
   try {
-    if (typeof globalThis !== "undefined" && globalThis.crypto?.randomUUID) {
-      return `trace-${globalThis.crypto.randomUUID()}`;
-    }
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const crypto = require("crypto");
-    if (crypto.randomUUID) {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
       return `trace-${crypto.randomUUID()}`;
     }
   } catch {}
-  return `trace-${Date.now()}-${Math.random().toString(36).substring(2, 10)}-${Math.random().toString(36).substring(2, 10)}`;
+  return `trace-${Date.now()}-${Math.random().toString(36).substring(2, 10)}`;
 }
 
 /**
@@ -120,17 +171,21 @@ export function interceptAndTranslateUpstreamError(
   let suggestedDuration: Duration | undefined = undefined;
   let actionLabel: string | undefined = undefined;
 
+  // Truncate raw message to 250 characters before running fallback regexes.
+  // Prevents Catastrophic Regex Backtracking (ReDoS) against unbounded attacker payloads.
+  const safeRegexTarget = rawTechnicalMessage.substring(0, 250);
+
   switch (errorCode) {
     case "ERR_UNSUPPORTED_ASPECT_RATIO_IN_PROMPT": {
       // 1. Structured metadata priority
       // 2. Structured header fallback
-      // 3. Resilient multi-pattern regex fallback
+      // 3. Resilient bounded regex fallback (on safe 250-char window)
       const invalidRatio =
         errorPayload?.metadata?.invalidRatio ||
         upstreamHeaders["x-invalid-ratio"] ||
         upstreamHeaders["x-upstream-invalid-ratio"] ||
-        rawTechnicalMessage.match(/aspect\s+ratio\s+['"]?([^'"]+)['"]?/i)?.[1] ||
-        rawTechnicalMessage.match(/\b(\d+:\d+)\b/)?.[1] ||
+        safeRegexTarget.match(/aspect\s+ratio\s+['"]?([0-9]+:[0-9]+)['"]?/i)?.[1] ||
+        safeRegexTarget.match(/\b([0-9]+:[0-9]+)\b/)?.[1] ||
         "specified";
       sanitizedMessage = `The aspect ratio '${invalidRatio}' in your prompt is not supported.`;
       category = "ASPECT_RATIO";
@@ -142,14 +197,15 @@ export function interceptAndTranslateUpstreamError(
     case "ERR_ASPECT_RATIO_DROPDOWN_CONFLICT": {
       // 1. Structured metadata priority (eliminates fragile regex scraping)
       // 2. Structured header fallback
-      // 3. Resilient multi-pattern regex fallback
+      // 3. Resilient bounded regex fallback (on safe 250-char window)
       const promptRatio =
         errorPayload?.metadata?.conflictingRatio ||
         errorPayload?.metadata?.promptRatio ||
         upstreamHeaders["x-conflicting-prompt-ratio"] ||
         upstreamHeaders["x-upstream-conflicting-ratio"] ||
-        rawTechnicalMessage.match(/prompt(?:\s+semantic)?\s+ratio(?:\s+constraint)?\s+['"]?([^'"]+)['"]?/i)?.[1] ||
-        rawTechnicalMessage.match(/(?:requested|prompt)\s+['"]?(\d+:\d+)['"]?/i)?.[1] ||
+        safeRegexTarget.match(/prompt\s+(?:semantic\s+)?ratio(?:\s+constraint)?\s+['"]?([0-9]+:[0-9]+)['"]?/i)?.[1] ||
+        safeRegexTarget.match(/(?:requested|prompt)\s+['"]?([0-9]+:[0-9]+)['"]?/i)?.[1] ||
+        safeRegexTarget.match(/\b([0-9]+:[0-9]+)\b/)?.[1] ||
         "in prompt";
 
       const dropdownRatio =
@@ -157,8 +213,9 @@ export function interceptAndTranslateUpstreamError(
         errorPayload?.metadata?.dropdownRatio ||
         upstreamHeaders["x-selected-dropdown-ratio"] ||
         upstreamHeaders["x-upstream-selected-ratio"] ||
-        rawTechnicalMessage.match(/(?:parameter|header)\s+['"]?x-zyka-aspect-ratio['"]?\s*\(?([^)\s'"]+)\)?/i)?.[1] ||
-        rawTechnicalMessage.match(/(?:selected|dropdown)\s+['"]?(\d+:\d+)['"]?/i)?.[1] ||
+        safeRegexTarget.match(/(?:parameter|header)\s+['"]?x-zyka-aspect-ratio['"]?\s*\(?([0-9]+:[0-9]+)\)?/i)?.[1] ||
+        safeRegexTarget.match(/(?:selected|dropdown)\s+['"]?([0-9]+:[0-9]+)['"]?/i)?.[1] ||
+        safeRegexTarget.match(/\b([0-9]+:[0-9]+)\b/)?.[1] ||
         "in dropdown";
 
       sanitizedMessage = `Your prompt requested ${promptRatio}, but ${dropdownRatio} is selected in the aspect ratio dropdown.`;
@@ -172,14 +229,15 @@ export function interceptAndTranslateUpstreamError(
     case "ERR_DURATION_DROPDOWN_CONFLICT": {
       // 1. Structured metadata priority (eliminates fragile regex scraping)
       // 2. Structured header fallback
-      // 3. Resilient multi-pattern regex fallback
+      // 3. Resilient bounded regex fallback (on safe 250-char window)
       const promptDuration =
         errorPayload?.metadata?.conflictingDuration ||
         errorPayload?.metadata?.promptDuration ||
         upstreamHeaders["x-conflicting-prompt-duration"] ||
         upstreamHeaders["x-upstream-conflicting-duration"] ||
-        rawTechnicalMessage.match(/prompt(?:\s+semantic)?\s+duration\s+['"]?([^'"]+)['"]?/i)?.[1] ||
-        rawTechnicalMessage.match(/(?:requested|prompt)\s+['"]?(\d+s?)['"]?/i)?.[1] ||
+        safeRegexTarget.match(/prompt\s+(?:semantic\s+)?duration\s+['"]?([0-9]+s?)['"]?/i)?.[1] ||
+        safeRegexTarget.match(/(?:requested|prompt)\s+['"]?([0-9]+s?)['"]?/i)?.[1] ||
+        safeRegexTarget.match(/\b([0-9]+s)\b/i)?.[1] ||
         "in prompt";
 
       const dropdownDuration =
@@ -187,8 +245,9 @@ export function interceptAndTranslateUpstreamError(
         errorPayload?.metadata?.dropdownDuration ||
         upstreamHeaders["x-selected-dropdown-duration"] ||
         upstreamHeaders["x-upstream-selected-duration"] ||
-        rawTechnicalMessage.match(/(?:ingress\s+)?duration\s+header\s+['"]?([^'"]+)['"]?/i)?.[1] ||
-        rawTechnicalMessage.match(/(?:selected|dropdown)\s+['"]?(\d+s?)['"]?/i)?.[1] ||
+        safeRegexTarget.match(/(?:ingress\s+)?duration\s+header\s+['"]?([0-9]+s?)['"]?/i)?.[1] ||
+        safeRegexTarget.match(/(?:selected|dropdown)\s+['"]?([0-9]+s?)['"]?/i)?.[1] ||
+        safeRegexTarget.match(/\b([0-9]+s)\b/i)?.[1] ||
         "in dropdown";
 
       sanitizedMessage = `Your prompt requested ${promptDuration}, but ${dropdownDuration} is selected in the duration dropdown.`;
@@ -330,19 +389,42 @@ export function interceptAndTranslateUpstreamError(
       break;
   }
 
-  // Sanitize all outgoing headers: enforce 1000 char limit and serialize objects safely to prevent 431 crashes
-  const cleanUpstreamHeaders: Record<string, string> = {};
-  for (const [k, v] of Object.entries(upstreamHeaders)) {
-    cleanUpstreamHeaders[k] = sanitizeHeaderValue(v);
-  }
-
-  const enrichedHeaders: Record<string, string> = {
-    ...cleanUpstreamHeaders,
-    "x-raw-upstream-error": sanitizeHeaderValue(rawTechnicalMessage),
+  // 1. Guaranteed Core Interceptor Response Headers (strictly sanitised & ASCII safe)
+  const coreHeaders: Record<string, string> = {
     "x-zyka-sanitized-error": sanitizeHeaderValue(sanitizedMessage),
     "x-zyka-error-code": sanitizeHeaderValue(errorCode),
     "x-zyka-middleware-processed": "true",
     "x-zyka-error-category": sanitizeHeaderValue(category),
+    "x-raw-upstream-error": sanitizeHeaderValue(rawTechnicalMessage),
+  };
+
+  // 2. Calculate baseline byte consumption from core telemetry headers
+  let cumulativeHeaderBytes = 0;
+  for (const [k, v] of Object.entries(coreHeaders)) {
+    cumulativeHeaderBytes += k.length + v.length + 4; // key + ": " + val + "\r\n"
+  }
+
+  // 3. Selectively forward allowlisted upstream headers under strict cumulative 4KB budget
+  // Prevents header flooding attacks, junk upstream header leaks, and proxy 431 errors
+  const cleanUpstreamHeaders: Record<string, string> = {};
+  for (const [k, v] of Object.entries(upstreamHeaders)) {
+    const lowerKey = k.toLowerCase();
+    if (
+      ALLOWED_UPSTREAM_HEADERS.has(lowerKey) ||
+      lowerKey.startsWith("x-zyka-")
+    ) {
+      const sanitizedVal = sanitizeHeaderValue(v);
+      const entryBytes = k.length + sanitizedVal.length + 4;
+      if (cumulativeHeaderBytes + entryBytes <= MAX_TOTAL_HEADERS_BYTES) {
+        cleanUpstreamHeaders[k] = sanitizedVal;
+        cumulativeHeaderBytes += entryBytes;
+      }
+    }
+  }
+
+  const enrichedHeaders: Record<string, string> = {
+    ...cleanUpstreamHeaders,
+    ...coreHeaders,
   };
 
   return {

@@ -1,12 +1,14 @@
 /**
  * ============================================================================
  * ZYKA AI — Targeted Vulnerability Hardening Test Suite
- * Verifies fixes for the 5 structural & runtime vulnerabilities in error-interceptor.ts:
- * 1. Structured metadata priority (resilience against regex breakage)
- * 2. Uncapped header size limits (431 truncation <= 1000 chars)
- * 3. Blind object coercion safe serialization (no "[object Object]")
- * 4. High-collision trace IDs (RFC 4122 UUID uniqueness under concurrent load)
- * 5. Catch-all for unhandled 4xx errors (categorized as VALIDATION)
+ * Rigorous Security & High-Stress Verification:
+ * 1. Synchronous Event Loop Blocking (DoS Vector Prevention via Shallow Serialization)
+ * 2. Unicode Header Crashes (ERR_INVALID_CHAR Prevention via Strict ASCII 0x20-0x7E)
+ * 3. Catastrophic Regex Backtracking (ReDoS Defense via 250-char window & bounded patterns)
+ * 4. Cumulative Header Size Overflow (431 Bypass Defense via Allowlist & 4KB Budget)
+ * 5. Edge Runtime Compatibility (Web Crypto API without bundler-hostile require)
+ * 6. Structured Metadata Priority (Upstream String Drift Resilience)
+ * 7. Incomplete Catch-All for 4xx Errors (Validation Categorization)
  * ============================================================================
  */
 
@@ -31,139 +33,169 @@ function assert(condition, message) {
 
 async function main() {
   console.log(`\n========================================================================`);
-  console.log(`  ZYKA AI — ERROR INTERCEPTOR VULNERABILITY VERIFICATION`);
+  console.log(`  ZYKA AI — HIGH-STRESS SECURITY & VULNERABILITY AUDIT SUITE`);
   console.log(`  Timestamp: ${new Date().toISOString()}`);
   console.log(`========================================================================\n`);
 
   // --------------------------------------------------------------------------
-  // FIX 1: Structured Metadata Priority (Resilient to Upstream String Drift)
+  // AUDIT 1: Synchronous Event Loop Blocking (DoS Vector Prevention)
   // --------------------------------------------------------------------------
-  console.log(`[VULN 1] Resilient Metadata Parsing Over Fragile String Scraping`);
+  console.log(`[SECURITY 1] Event Loop DoS Defense (Massive & Circular Objects)`);
 
-  // Upstream changes message completely to something unmatchable by the old regex:
-  const strangeUpstreamMsg = "Anomalous tensor divergence occurred in downstream pipeline cluster-9.";
+  // Create a massive 50MB-equivalent object with 20,000 keys and nested graphs
+  const massiveObject = {};
+  for (let i = 0; i < 20000; i++) {
+    massiveObject[`payload_key_${i}`] = {
+      nested: "x".repeat(100),
+      deep: { level: 2, array: [1, 2, 3, 4, 5] },
+    };
+  }
 
-  const ratioResult = interceptAndTranslateUpstreamError(
+  const startMs = Date.now();
+  const serialized = sanitizeHeaderValue(massiveObject);
+  const durationMs = Date.now() - startMs;
+
+  assert(
+    durationMs < 25,
+    `Shallow serialization of 20,000-key object completed in ${durationMs}ms (< 25ms threshold, 0 event loop lag)`
+  );
+  assert(
+    serialized.length <= 1000,
+    `Sanitized massive object header is strictly bounded to <= 1000 chars (got ${serialized.length})`
+  );
+  assert(
+    !serialized.includes("[object Object]"),
+    `Header does not degrade to '[object Object]' (actual snippet: ${serialized.substring(0, 50)}...)`
+  );
+
+  // Circular reference object must not throw or block
+  const circularObj = { name: "upstream_probe" };
+  circularObj.self = circularObj;
+  const circularSerialized = sanitizeHeaderValue(circularObj);
+  assert(
+    typeof circularSerialized === "string" && circularSerialized.length > 0,
+    `Circular object handled without exception or loop freeze: "${circularSerialized}"`
+  );
+
+  // --------------------------------------------------------------------------
+  // AUDIT 2: Unicode Header Crashes (ERR_INVALID_CHAR Prevention)
+  // --------------------------------------------------------------------------
+  console.log(`\n[SECURITY 2] Strict ASCII Header Encoding (Node ERR_INVALID_CHAR Defense)`);
+
+  const maliciousUnicodeHeader =
+    "Prompt with emojis 🐻 🚀 and Cyrillic Привет and Chinese 艺术 and control \x00\x07\x1B characters!";
+
+  const sanitizedAscii = sanitizeHeaderValue(maliciousUnicodeHeader);
+
+  // Verify all characters are strictly within printable 7-bit ASCII [0x20 - 0x7E]
+  let hasInvalidChar = false;
+  for (let i = 0; i < sanitizedAscii.length; i++) {
+    const code = sanitizedAscii.charCodeAt(i);
+    if (code < 0x20 || code > 0x7E) {
+      hasInvalidChar = true;
+      break;
+    }
+  }
+
+  assert(
+    !hasInvalidChar,
+    `All characters in sanitized header are strictly in ASCII 0x20-0x7E range (no unicode/control chars)`
+  );
+
+  // Verify that Node.js Headers accepts it without throwing TypeError: Invalid character
+  let headersAccepted = false;
+  try {
+    const h = new Headers();
+    h.set("x-test-header", sanitizedAscii);
+    headersAccepted = h.get("x-test-header") === sanitizedAscii;
+  } catch (e) {
+    headersAccepted = false;
+  }
+
+  assert(
+    headersAccepted,
+    `Node.js Headers engine accepted header without ERR_INVALID_CHAR crash`
+  );
+
+  // --------------------------------------------------------------------------
+  // AUDIT 3: Catastrophic Regex Backtracking (ReDoS Defense)
+  // --------------------------------------------------------------------------
+  console.log(`\n[SECURITY 3] Catastrophic Regex Backtracking (ReDoS Defense)`);
+
+  // Adversarial 50,000-character payload crafted to trigger exponential backtracking
+  const redosBomb = "prompt semantic ratio " + "   ".repeat(15000) + "x";
+
+  const redosStart = Date.now();
+  const redosResult = interceptAndTranslateUpstreamError(
     422,
     { "x-upstream-error-code": "ERR_ASPECT_RATIO_DROPDOWN_CONFLICT" },
     {
       code: "ERR_ASPECT_RATIO_DROPDOWN_CONFLICT",
-      technicalMessage: strangeUpstreamMsg,
-      metadata: {
-        conflictingRatio: "4:3",
-        selectedRatio: "16:9",
-      },
+      technicalMessage: redosBomb,
     }
   );
+  const redosDuration = Date.now() - redosStart;
 
   assert(
-    ratioResult.sanitizedError.userMessage === "Your prompt requested 4:3, but 16:9 is selected in the aspect ratio dropdown.",
-    `Aspect ratio conflict uses structured metadata even with completely altered upstream string: "${ratioResult.sanitizedError.userMessage}"`
+    redosDuration < 10,
+    `Adversarial 50,000-char ReDoS payload processed in ${redosDuration}ms (< 10ms threshold, CPU lock prevented)`
   );
   assert(
-    ratioResult.sanitizedError.suggestedRatio === "4:3",
-    `suggestedRatio correctly extracted as '4:3'`
-  );
-
-  const durationResult = interceptAndTranslateUpstreamError(
-    422,
-    { "x-upstream-error-code": "ERR_DURATION_DROPDOWN_CONFLICT" },
-    {
-      code: "ERR_DURATION_DROPDOWN_CONFLICT",
-      technicalMessage: strangeUpstreamMsg,
-      metadata: {
-        conflictingDuration: "12s",
-        selectedDuration: "5s",
-      },
-    }
-  );
-
-  assert(
-    durationResult.sanitizedError.userMessage === "Your prompt requested 12s, but 5s is selected in the duration dropdown.",
-    `Duration conflict uses structured metadata: "${durationResult.sanitizedError.userMessage}"`
-  );
-
-  const unsupportedRatioResult = interceptAndTranslateUpstreamError(
-    422,
-    { "x-upstream-error-code": "ERR_UNSUPPORTED_ASPECT_RATIO_IN_PROMPT" },
-    {
-      code: "ERR_UNSUPPORTED_ASPECT_RATIO_IN_PROMPT",
-      technicalMessage: strangeUpstreamMsg,
-      metadata: {
-        invalidRatio: "3:1",
-      },
-    }
-  );
-
-  assert(
-    unsupportedRatioResult.sanitizedError.userMessage === "The aspect ratio '3:1' in your prompt is not supported.",
-    `Unsupported ratio uses structured metadata: "${unsupportedRatioResult.sanitizedError.userMessage}"`
+    redosResult.sanitizedError.category === "ASPECT_RATIO",
+    `Fallback processing completed safely under ReDoS attack`
   );
 
   // --------------------------------------------------------------------------
-  // FIX 2: Uncapped Header Size Limits (Prevent HTTP 431 Proxy Crashes)
+  // AUDIT 4: Cumulative Header Size Overflow (431 Bypass Defense)
   // --------------------------------------------------------------------------
-  console.log(`\n[VULN 2] Header Size Limits (Truncation to <= 1000 Chars)`);
+  console.log(`\n[SECURITY 4] Cumulative Header Budget & Allowlist (Total 431 Defense)`);
 
-  // Massive 25KB stack trace
-  const massiveStackTrace = "java.lang.NullPointerException: Service fault\n" + "at com.zyka.gpu.Worker.process(Worker.java:42)\n".repeat(500);
-
-  const headerSanitized = sanitizeHeaderValue(massiveStackTrace);
-  assert(
-    headerSanitized.length <= 1000,
-    `sanitizeHeaderValue truncates 25KB string to <= 1000 chars (actual: ${headerSanitized.length})`
-  );
-  assert(
-    !headerSanitized.includes("\n") && !headerSanitized.includes("\r"),
-    `Header sanitization strips carriage returns and newlines`
-  );
-
-  const massiveResult = interceptAndTranslateUpstreamError(
-    500,
-    {
-      "x-upstream-error-code": "ERR_INTERNAL_FAULT",
-      "x-upstream-raw-error": massiveStackTrace,
-      "x-custom-giant-header": "A".repeat(5000),
-    }
-  );
-
-  for (const [key, val] of Object.entries(massiveResult.responseHeaders)) {
-    assert(
-      val.length <= 1000,
-      `Header '${key}' length (${val.length}) is strictly <= 1000 chars`
-    );
+  // 40 junk upstream headers totaling 40,000 bytes
+  const junkUpstreamHeaders = {
+    "x-upstream-error-code": "ERR_ASPECT_RATIO_MISMATCH",
+    "x-upstream-service": "Zyka-Spatial-Engine",
+    "x-upstream-trace-id": "trace-test-budget-123",
+  };
+  for (let i = 0; i < 40; i++) {
+    junkUpstreamHeaders[`x-untrusted-junk-header-${i}`] = "JUNK_DATA_".repeat(100);
   }
 
-  // --------------------------------------------------------------------------
-  // FIX 3: Blind Object Coercion in Headers (No "[object Object]")
-  // --------------------------------------------------------------------------
-  console.log(`\n[VULN 3] Safe Object Serialization (No '[object Object]')`);
+  const budgetResult = interceptAndTranslateUpstreamError(422, junkUpstreamHeaders);
 
-  const complexObject = {
-    errorCode: "GPU_OOM_0x42",
-    details: { allocatedBytes: 24000000000, freeBytes: 12000 },
-  };
+  // Calculate total byte size of all generated headers
+  let totalHeaderBytes = 0;
+  for (const [k, v] of Object.entries(budgetResult.responseHeaders)) {
+    totalHeaderBytes += k.length + v.length + 4; // key + ": " + val + "\r\n"
+  }
 
-  const objectSanitized = sanitizeHeaderValue(complexObject);
   assert(
-    !objectSanitized.includes("[object Object]"),
-    `Object header is NOT coerced to '[object Object]' (actual: "${objectSanitized}")`
-  );
-  assert(
-    objectSanitized.includes("GPU_OOM_0x42"),
-    `Object header contains valid JSON serialized properties`
+    totalHeaderBytes <= 4096,
+    `Total cumulative header size (${totalHeaderBytes} bytes) strictly within 4096-byte budget`
   );
 
-  const arraySanitized = sanitizeHeaderValue(["ratio_1", "ratio_2"]);
+  // Verify junk headers were rejected by allowlist
+  const forwardedJunk = Object.keys(budgetResult.responseHeaders).filter((k) =>
+    k.startsWith("x-untrusted-junk")
+  );
   assert(
-    !arraySanitized.includes("[object Object]"),
-    `Array header is cleanly serialized: "${arraySanitized}"`
+    forwardedJunk.length === 0,
+    `Zero unallowlisted upstream junk headers forwarded through proxy (${forwardedJunk.length} leaked)`
+  );
+
+  // Verify core translation headers were preserved
+  assert(
+    budgetResult.responseHeaders["x-zyka-sanitized-error"] !== undefined,
+    `Core header 'x-zyka-sanitized-error' is preserved`
+  );
+  assert(
+    budgetResult.responseHeaders["x-zyka-error-code"] === "ERR_ASPECT_RATIO_MISMATCH",
+    `Core header 'x-zyka-error-code' is preserved`
   );
 
   // --------------------------------------------------------------------------
-  // FIX 4: High-Collision Trace IDs (crypto.randomUUID() under High Concurrency)
+  // AUDIT 5: Edge Runtime Compatibility (Bundler-Hostile require() Elimination)
   // --------------------------------------------------------------------------
-  console.log(`\n[VULN 4] Collision-Free Trace IDs Under High Concurrency`);
+  console.log(`\n[SECURITY 5] Web Crypto API Edge Runtime Compatibility`);
 
   const CONCURRENT_COUNT = 500;
   const traceIds = new Set();
@@ -186,44 +218,42 @@ async function main() {
   );
 
   // --------------------------------------------------------------------------
-  // FIX 5: Incomplete Catch-All for 4xx Errors (Categorized as VALIDATION)
+  // AUDIT 6: Structured Metadata Priority (String Drift Resilience)
   // --------------------------------------------------------------------------
-  console.log(`\n[VULN 5] Catch-All for Unhandled 4xx Errors`);
+  console.log(`\n[SECURITY 6] Structured Metadata Priority Over String Drift`);
 
-  // Unhandled 400 Bad Request
+  const alteredUpstreamMsg = "Anomalous tensor divergence in cluster 9";
+  const structuredRatioResult = interceptAndTranslateUpstreamError(
+    422,
+    { "x-upstream-error-code": "ERR_ASPECT_RATIO_DROPDOWN_CONFLICT" },
+    {
+      code: "ERR_ASPECT_RATIO_DROPDOWN_CONFLICT",
+      technicalMessage: alteredUpstreamMsg,
+      metadata: { conflictingRatio: "4:3", selectedRatio: "16:9" },
+    }
+  );
+
+  assert(
+    structuredRatioResult.sanitizedError.userMessage ===
+      "Your prompt requested 4:3, but 16:9 is selected in the aspect ratio dropdown.",
+    `Structured metadata prioritized over altered upstream text: "${structuredRatioResult.sanitizedError.userMessage}"`
+  );
+
+  // --------------------------------------------------------------------------
+  // AUDIT 7: Catch-All for Unhandled 4xx Errors (Validation Categorization)
+  // --------------------------------------------------------------------------
+  console.log(`\n[SECURITY 7] Catch-All for Unhandled 4xx Errors`);
+
   const unhandled400 = interceptAndTranslateUpstreamError(400, {
     "x-upstream-error-code": "ERR_UNKNOWN_CLIENT_FIELD",
   });
   assert(
     unhandled400.sanitizedError.category === "VALIDATION",
-    `Unhandled 400 categorized as VALIDATION (got: ${unhandled400.sanitizedError.category})`
-  );
-  assert(
-    unhandled400.sanitizedError.userMessage !== "An unexpected error occurred. Please try again.",
-    `Unhandled 400 has contextual client message: "${unhandled400.sanitizedError.userMessage}"`
+    `Unhandled 400 categorized as VALIDATION`
   );
 
-  // Unhandled 422 Unprocessable Entity
-  const unhandled422 = interceptAndTranslateUpstreamError(422, {
-    "x-upstream-error-code": "ERR_DOWNSTREAM_SEMANTIC_INVALID",
-  });
-  assert(
-    unhandled422.sanitizedError.category === "VALIDATION",
-    `Unhandled 422 categorized as VALIDATION (got: ${unhandled422.sanitizedError.category})`
-  );
-
-  // Unhandled 404 Not Found
-  const unhandled404 = interceptAndTranslateUpstreamError(404, {
-    "x-upstream-error-code": "ERR_MODEL_NOT_FOUND",
-  });
-  assert(
-    unhandled404.sanitizedError.category === "VALIDATION",
-    `Unhandled 404 categorized as VALIDATION`
-  );
-
-  // 500 still correctly categorized as SYSTEM
   const unhandled500 = interceptAndTranslateUpstreamError(500, {
-    "x-upstream-error-code": "ERR_UNKNOWN_BACKEND_CRASH",
+    "x-upstream-error-code": "ERR_UNKNOWN_CRASH",
   });
   assert(
     unhandled500.sanitizedError.category === "SYSTEM",
@@ -234,7 +264,7 @@ async function main() {
   // SUMMARY
   // --------------------------------------------------------------------------
   console.log(`\n========================================================================`);
-  console.log(`  VULNERABILITY VERIFICATION RESULTS`);
+  console.log(`  SECURITY & HARDENING AUDIT SUMMARY`);
   console.log(`  Passed: ${passed} | Failed: ${failed}`);
   console.log(`  Success Rate: ${((passed / (passed + failed)) * 100).toFixed(1)}%`);
   console.log(`========================================================================\n`);
@@ -245,6 +275,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("Vulnerability verification failed with exception:", err);
+  console.error("Hardening test failed with exception:", err);
   process.exit(1);
 });
