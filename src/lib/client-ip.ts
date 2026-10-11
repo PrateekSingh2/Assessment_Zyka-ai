@@ -1,18 +1,17 @@
 /**
  * Zero-Trust Client IP Resolution
  *
- * SECURITY: Only trusts proxy headers when TRUSTED_PROXY_HOPS > 0.
- * All client-supplied x-zyka-* IP headers are DROPPED and NEVER trusted.
- *
- * Set TRUSTED_PROXY_HOPS=1 in env when exactly one trusted reverse proxy
- * sits in front of this server. Set 0 (default) when directly exposed.
- *
- * NEVER read x-zyka-real-ip / x-zyka-client-public-ip / x-zyka-ip-source
- * from request headers as a trust signal — those are attacker-controlled.
+ * SECURITY:
+ * 1. Only trusts X-Forwarded-For when TRUSTED_PROXY_HOPS > 0, walking right-to-left.
+ * 2. If TRUSTED_PROXY_HOPS > 0 and X-Forwarded-For is missing/invalid, fails closed (UntrustedOriginError).
+ * 3. In production, TRUSTED_PROXY_HOPS is mandatory (fails closed).
+ * 4. Never returns the server's LAN IP — avoids collapsing all users into one rate-limit bucket.
+ * 5. Provides getIpSubnetKey() which collapses IPv6 to /64 to prevent residential /64 flooding.
+ * 6. User anonymization uses HMAC with a server secret to prevent IPv4 rainbow-table reversals.
  */
 
 import { isIP } from "node:net";
-import type { ReadonlyHeaders } from "next/dist/server/web/spec-extension/adapters/headers";
+import crypto from "node:crypto";
 
 export type IpSource =
   | "x-forwarded-for"
@@ -25,43 +24,52 @@ export interface ClientIpResult {
   readonly source: IpSource;
 }
 
-// How many proxy hops to trust on X-Forwarded-For (right-to-left).
+export class UntrustedOriginError extends Error {
+  constructor(message = "Request did not traverse configured trusted proxy") {
+    super(message);
+    this.name = "UntrustedOriginError";
+  }
+}
+
 const TRUSTED_HOPS = Math.max(
   0,
   parseInt(process.env.TRUSTED_PROXY_HOPS ?? "0", 10) || 0
 );
 
 /** Strip IPv4-mapped IPv6 prefix and validate; return null if invalid. */
-function normalizeAndValidate(raw: string): string | null {
+export function normalizeAndValidateIp(raw: string): string | null {
   let t = raw.trim();
-  // Strip IPv4-mapped IPv6 prefix (::ffff:)
   t = t.replace(/^::ffff:/i, "");
-  // Reject anything too long or not a valid IP address
   if (t.length > 45 || isIP(t) === 0) return null;
-  return t;
-}
-
-function isLoopback(ip: string): boolean {
-  return (
-    ip === "127.0.0.1" ||
-    ip === "::1" ||
-    ip === "0.0.0.0" ||
-    ip.startsWith("127.")
-  );
+  return t.toLowerCase();
 }
 
 /**
- * Resolves the real client IP with zero trust toward any client-supplied header.
- *
- * When TRUSTED_PROXY_HOPS > 0, reads the Nth-from-right entry in
- * X-Forwarded-For (where N = TRUSTED_PROXY_HOPS), which is the entry
- * appended by the outermost trusted proxy. This is the only correct way
- * to use XFF behind a known proxy.
+ * Returns a bucket key:
+ * - For IPv4: returns the IP as-is (single /32).
+ * - For IPv6: truncates to the first 4 hex groups (/64 prefix) to prevent single-connection flood.
+ */
+export function getIpSubnetKey(ip: string): string {
+  const norm = normalizeAndValidateIp(ip) ?? "127.0.0.1";
+  if (!norm.includes(":")) {
+    return norm; // IPv4
+  }
+  // Expand or split IPv6 into segments
+  // Quick normalization for IPv6 prefix
+  const parts = norm.split(":");
+  if (parts.length >= 4) {
+    return `${parts.slice(0, 4).join(":")}::/64`;
+  }
+  return `${norm}::/64`;
+}
+
+/**
+ * Resolves the real client IP.
  */
 export function resolveClientIp(
-  headers: Headers | ReadonlyHeaders | Record<string, string>
+  headers: Headers | Record<string, string>
 ): ClientIpResult {
-  const get = (name: string): string | null => {
+  const getHeader = (name: string): string | null => {
     if (typeof (headers as Headers).get === "function") {
       return (headers as Headers).get(name);
     }
@@ -70,70 +78,47 @@ export function resolveClientIp(
   };
 
   if (TRUSTED_HOPS > 0) {
-    const xff = get("x-forwarded-for") ?? "";
-    const parts = xff.split(",").map((p) => p.trim());
-    // The entry placed by the outermost trusted proxy is at index (total - TRUSTED_HOPS)
-    const candidate = parts[parts.length - TRUSTED_HOPS] ?? "";
-    const ip = normalizeAndValidate(candidate);
-    if (ip && !isLoopback(ip)) {
-      return { ip, source: "x-forwarded-for" };
+    const xff = getHeader("x-forwarded-for");
+    if (!xff) {
+      throw new UntrustedOriginError("Missing X-Forwarded-For header from trusted proxy");
     }
+    const parts = xff.split(",").map((p) => p.trim());
+    if (parts.length < TRUSTED_HOPS) {
+      throw new UntrustedOriginError("Insufficient proxy hops in X-Forwarded-For");
+    }
+    const candidate = parts[parts.length - TRUSTED_HOPS] ?? "";
+    const validIp = normalizeAndValidateIp(candidate);
+    if (!validIp) {
+      throw new UntrustedOriginError("Invalid IP address in X-Forwarded-For");
+    }
+    return { ip: validIp, source: "x-forwarded-for" };
   }
 
-  // Fallback: server sees this directly from the socket (req.ip in Next.js)
-  // In Next.js App Router the socket IP is not directly exposed on
-  // the NextRequest object in all runtimes, so we use LAN discovery in dev.
-  const systemLan = getSystemLanIp();
-  if (systemLan) return { ip: systemLan, source: "system-lan-interface" };
+  // When TRUSTED_HOPS === 0
+  if (process.env.NODE_ENV === "production") {
+    // Fail closed in production if TRUSTED_PROXY_HOPS is unconfigured
+    throw new Error("TRUSTED_PROXY_HOPS environment variable must be configured in production");
+  }
 
+  // Development fallback: return fixed loopback, NEVER the server's LAN IP
   return { ip: "127.0.0.1", source: "remote-addr-fallback" };
 }
 
-/**
- * Resolves the server's active non-loopback LAN IPv4 address.
- * Used only as a last-resort fallback for local dev; never in production.
- */
-export function getSystemLanIp(): string | null {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const os = require("os") as typeof import("os");
-    const ifaces = os.networkInterfaces();
-    for (const name of Object.keys(ifaces)) {
-      const netList = ifaces[name];
-      if (!netList) continue;
-      for (const net of netList) {
-        if (net.family === "IPv4" && !net.internal && !isLoopback(net.address)) {
-          return net.address;
-        }
-      }
-    }
-  } catch {
-    // Edge runtime — no os module
-  }
-  return null;
-}
+/** Server-side HMAC anonymous user fingerprint */
+const ANONYMIZATION_SECRET =
+  process.env.SESSION_SECRET ||
+  process.env.ADMIN_API_TOKEN ||
+  "zyka_dev_salt_k9x2m4p8q1v7w5z3";
 
-/** Deterministic anonymous fingerprint from IP + UA. Server-side only. */
 export function resolveAnonymousUserId(
   ip: string,
   userAgent: string
 ): string {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const crypto = require("crypto") as typeof import("crypto");
-    const hash = crypto
-      .createHash("sha256")
-      .update(`${ip}|${userAgent}`)
-      .digest("hex")
-      .substring(0, 10);
-    return `usr_anon_${hash}`;
-  } catch {
-    // Fallback djb2
-    let h = 5381;
-    const str = `${ip}|${userAgent}`;
-    for (let i = 0; i < str.length; i++) {
-      h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
-    }
-    return `usr_anon_${h.toString(16).padStart(8, "0")}`;
-  }
+  const subnet = getIpSubnetKey(ip);
+  const hmac = crypto
+    .createHmac("sha256", ANONYMIZATION_SECRET)
+    .update(`${subnet}|${userAgent.slice(0, 128)}`)
+    .digest("hex")
+    .substring(0, 12);
+  return `usr_anon_${hmac}`;
 }

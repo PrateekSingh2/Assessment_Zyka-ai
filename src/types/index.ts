@@ -60,13 +60,8 @@ export interface GenerationResponseSuccess {
 export interface GenerationResponseError {
   success: false;
   statusCode: number;
-  rawError: UpstreamErrorDetail;
+  traceId: string;
   sanitizedError: SanitizedErrorDetail;
-  debug: {
-    requestHeaders: Record<string, string>;
-    responseHeaders: Record<string, string>;
-  };
-  serverLog?: ServerErrorLogEntry;
 }
 
 export type GenerationResponse =

@@ -1,4 +1,4 @@
-import { MediaType, AspectRatio, Duration } from "@/types";
+import type { MediaType, AspectRatio, Duration } from "../types/index.ts";
 
 export interface MockUpstreamResult {
   status: number;
@@ -171,105 +171,97 @@ export async function executeMockUpstreamAI(params: {
     };
   }
 
-  // 7. Edge Case: Duration Limits & Dropdown Conflict (checked BEFORE aspect ratio)
-  //
-  // FIX (false positives): negative lookbehind (?<!:) excludes clock-time
-  // contexts like "clock at 10:45" and matchAll evaluates ALL duration tokens.
-  const DURATION_RE = /(?<![:\d])(\d{1,3})\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?)(?!\w)/gi;
-  const BARE_SEC_RE = /(?<![:\d])(\d{1,3})s\b(?!ec)/gi;
+  // 7. Edge Case: Duration Limits & Dropdown Conflict (Video Only)
+  // FIX (N4): Duration limits (max 30s) strictly apply ONLY to Video generation.
+  // Image and Voice prompts (e.g. "5 minute photo", "80s synthwave", "ready in 5 minutes")
+  // must never be rejected by video temporal bounds.
+  if (normalizedType === "video") {
+    // Exclude places ("24 hour diner") and decades ("80s", "90s")
+    const isPlaceOrDecade = /\b(?:24\s*hours?\s*(?:diner|cafe|store|open|service|fitness|restaurant|market)|\d0s\b)/i.test(trimmed);
 
-  const allDurationMatches = [
-    ...trimmed.matchAll(DURATION_RE),
-    ...trimmed.matchAll(BARE_SEC_RE),
-  ];
+    if (!isPlaceOrDecade) {
+      const allDurationMatches = [
+        ...trimmed.matchAll(/(?<![\d:])(\d{1,3})\s*(seconds?|secs?)\b/gi),
+        ...trimmed.matchAll(/(?<![\d:])(\d{1,3})\s*(minutes?|mins?|hours?|hrs?)\b/gi),
+      ];
 
-  for (const m of allDurationMatches) {
-    const val = parseInt(m[1], 10);
-    const unitRaw = (m[2] ?? "s").toLowerCase();
-    const isMinuteOrHour =
-      unitRaw.startsWith("min") ||
-      unitRaw.startsWith("hr") ||
-      unitRaw.startsWith("hour");
-    const isSeconds = unitRaw.startsWith("sec") || unitRaw === "s";
-    const isOver30s = isMinuteOrHour || (isSeconds && val > 30);
+      for (const m of allDurationMatches) {
+        const val = parseInt(m[1], 10);
+        const unitRaw = (m[2] ?? "s").toLowerCase();
+        const isMinuteOrHour =
+          unitRaw.startsWith("min") ||
+          unitRaw.startsWith("hr") ||
+          unitRaw.startsWith("hour");
+        const isSeconds = unitRaw.startsWith("sec") || unitRaw === "s";
+        const isOver30s = isMinuteOrHour || (isSeconds && val > 30);
 
-    if (isOver30s) {
-      return {
-        status: 422,
-        headers: {
-          "x-upstream-error-code": "ERR_DURATION_OUT_OF_BOUNDS",
-          "x-upstream-raw-error": `[ERROR] VideoPipelineException: TemporalSequenceBoundsExceeded.\nCode: 0x4D2 - Requested temporal render length exceeds hard upper-bound threshold (max: 30s).\nTraceID: ${traceId}`,
-          "x-upstream-service": "Zyka-Temporal-Diffusion-Renderer",
-          "x-upstream-trace-id": traceId,
-        },
-        error: {
-          code: "ERR_DURATION_OUT_OF_BOUNDS",
-          technicalMessage: `[ERROR] VideoPipelineException: Requested duration exceeds max 30s.\nTraceID: ${traceId}`,
-          upstreamService: "Zyka-Temporal-Diffusion-Renderer",
-          traceId,
-        },
-      };
-    }
-
-    // Subcase: Duration conflict with dropdown (e.g., prompt says 10s but dropdown is 5s)
-    if (isSeconds && normalizedType === "video") {
-      const promptDuration = `${val}s` as Duration;
-      if (
-        ["2s", "5s", "10s", "15s", "30s"].includes(promptDuration) &&
-        duration &&
-        promptDuration !== duration
-      ) {
-        return {
-          status: 422,
-          headers: {
-            "x-upstream-error-code": "ERR_DURATION_DROPDOWN_CONFLICT",
-            "x-upstream-raw-error": `[ERROR] TemporalBudgetMismatch: header '${duration}' vs prompt '${promptDuration}'.\nTraceID: ${traceId}`,
-            "x-upstream-service": "Zyka-Temporal-Diffusion-Renderer",
-            "x-upstream-trace-id": traceId,
-            "x-conflicting-prompt-duration": promptDuration,
-            "x-selected-dropdown-duration": duration,
-          },
-          error: {
-            code: "ERR_DURATION_DROPDOWN_CONFLICT",
-            technicalMessage: `[ERROR] TemporalBudgetMismatch: header '${duration}' vs prompt '${promptDuration}'.\nTraceID: ${traceId}`,
-            upstreamService: "Zyka-Temporal-Diffusion-Renderer",
-            traceId,
-            metadata: {
-              conflictingDuration: promptDuration,
-              selectedDuration: duration,
+        if (isOver30s) {
+          return {
+            status: 422,
+            headers: {
+              "x-upstream-error-code": "ERR_DURATION_OUT_OF_BOUNDS",
+              "x-upstream-service": "Zyka-Temporal-Diffusion-Renderer",
+              "x-upstream-trace-id": traceId,
             },
-          },
-        };
+            error: {
+              code: "ERR_DURATION_OUT_OF_BOUNDS",
+              technicalMessage: `[ERROR] VideoPipelineException: TemporalSequenceBoundsExceeded. Requested duration exceeds max 30s.\nTraceID: ${traceId}`,
+              upstreamService: "Zyka-Temporal-Diffusion-Renderer",
+              traceId,
+            },
+          };
+        }
+
+        // Subcase: Duration conflict with dropdown (e.g., prompt says 10s but dropdown is 5s)
+        if (isSeconds) {
+          const promptDuration = `${val}s` as Duration;
+          if (
+            ["2s", "5s", "10s", "15s", "30s"].includes(promptDuration) &&
+            duration &&
+            promptDuration !== duration
+          ) {
+            return {
+              status: 422,
+              headers: {
+                "x-upstream-error-code": "ERR_DURATION_DROPDOWN_CONFLICT",
+                "x-upstream-service": "Zyka-Temporal-Diffusion-Renderer",
+                "x-upstream-trace-id": traceId,
+                "x-conflicting-prompt-duration": promptDuration,
+                "x-selected-dropdown-duration": duration,
+              },
+              error: {
+                code: "ERR_DURATION_DROPDOWN_CONFLICT",
+                technicalMessage: `[ERROR] TemporalBudgetMismatch: header '${duration}' vs prompt '${promptDuration}'.\nTraceID: ${traceId}`,
+                upstreamService: "Zyka-Temporal-Diffusion-Renderer",
+                traceId,
+                metadata: {
+                  conflictingDuration: promptDuration,
+                  selectedDuration: duration,
+                },
+              },
+            };
+          }
+        }
       }
     }
   }
 
-
-
-  // 8. Edge Case: Generic Aspect Ratio Detection & Mismatch in Prompt (e.g. 17:8, 2:1, 32:9)
+  // 8. Edge Case: Generic Aspect Ratio Detection & Mismatch in Prompt
   const supportedRatios: AspectRatio[] = ["16:9", "9:16", "1:1", "4:3", "21:9"];
 
-  // FIX (false positive): "clock showing 10:45" must NOT match as an aspect ratio.
-  // Strategy: only match X:Y if it is preceded (within 30 chars) by an aspect-ratio
-  // context keyword, OR if it exactly matches a known supported ratio.
-  // Anchored at word boundaries, max 4 digits each side to exclude port numbers.
-  const RATIO_CONTEXT_RE = /(?:aspect\s+ratio|ratio|widescreen|letterbox|portrait\s+mode|landscape\s+mode)\s*[:\-]?\s*(\d{1,4}:\d{1,4})/i;
-  const KNOWN_RATIO_RE = /\b(16:9|9:16|1:1|4:3|21:9)\b/i;
+  // FIX (N4): Clock times like "9:16" or "10:45" must NOT be treated as aspect ratios
+  // unless explicitly preceded by aspect ratio context keywords (e.g. "aspect ratio 9:16").
+  const RATIO_CONTEXT_RE = /(?:aspect\s*ratio|ratio|widescreen|letterbox|portrait\s*mode|landscape\s*mode)\s*[:\-]?\s*(\d{1,4}:\d{1,4})/i;
   const ANY_RATIO_RE = /\b(\d{1,4}:\d{1,4})\b/gi;
 
-  // First check for contextual aspect ratio mentions
-  const contextMatch = RATIO_CONTEXT_RE.exec(trimmed) ?? KNOWN_RATIO_RE.exec(trimmed);
-  // Then check for any bare X:Y pattern (only valid as ratio if it looks like one)
-  // Exclude: time patterns like HH:MM (hours 0-23, minutes 0-59)
-  let ratioMatch: RegExpExecArray | null = null;
-  if (contextMatch) {
-    ratioMatch = contextMatch;
-  } else {
+  let ratioMatch: RegExpExecArray | null = RATIO_CONTEXT_RE.exec(trimmed);
+
+  if (!ratioMatch) {
+    // Only evaluate bare X:Y if it DOES NOT look like a valid clock time (hours 0-23, mins 0-59)
     for (const m of trimmed.matchAll(ANY_RATIO_RE)) {
-      const [a, b] = m[1].split(":").map(Number);
-      // Exclude time-like values (HH:MM format) — hours 0-23, minutes 0-59
-      const looksLikeTime = a >= 0 && a <= 23 && b >= 0 && b <= 59;
-      if (!looksLikeTime) {
+      const [h, min] = m[1].split(":").map(Number);
+      const isClockTime = h >= 0 && h <= 23 && min >= 0 && min <= 59;
+      if (!isClockTime) {
         ratioMatch = m as unknown as RegExpExecArray;
         break;
       }

@@ -42,13 +42,23 @@ function getResolvedIdentity(req: NextRequest): {
 } {
   // These headers are set by proxy.ts after zero-trust resolution.
   // They were stripped from client input before proxy ran, so they are safe.
-  const resolvedIp =
-    req.headers.get("x-zyka-resolved-ip") ?? "127.0.0.1";
-  const ipSource =
-    (req.headers.get("x-zyka-resolved-ip-source") as ServerErrorLogEntry["ipSource"]) ??
-    "remote-addr-fallback";
-  const resolvedUserId =
-    req.headers.get("x-zyka-resolved-user-id") ?? "usr_anon_unknown";
+  const resolvedIp = req.headers.get("x-zyka-resolved-ip") ?? "127.0.0.1";
+  const rawIpSource = req.headers.get("x-zyka-resolved-ip-source");
+  const VALID_SOURCES: ReadonlySet<string> = new Set([
+    "cf-connecting-ip",
+    "true-client-ip",
+    "x-real-ip",
+    "x-forwarded-for",
+    "client-public-wan",
+    "system-lan-interface",
+    "remote-addr-fallback",
+    "socket",
+  ]);
+  const ipSource: ServerErrorLogEntry["ipSource"] =
+    rawIpSource && VALID_SOURCES.has(rawIpSource)
+      ? (rawIpSource as ServerErrorLogEntry["ipSource"])
+      : "remote-addr-fallback";
+  const resolvedUserId = req.headers.get("x-zyka-resolved-user-id") ?? "usr_anon_unknown";
   const userAgent = req.headers.get("user-agent") ?? "unknown-client";
   return { resolvedIp, ipSource, resolvedUserId, userAgent };
 }
@@ -220,6 +230,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       "x-zyka-media-type": sanitizeHeaderValue(mediaType),
       "x-zyka-completed-at": new Date().toISOString(),
       "x-zyka-trace-id": sanitizeHeaderValue(traceId),
+      "x-zyka-resolved-ip": sanitizeHeaderValue(identity.resolvedIp),
     };
 
     // Forward allowed upstream headers with sanitization applied

@@ -92,12 +92,13 @@ export function interceptAndTranslateUpstreamError(
   };
 
   // Step 5: Core Interceptor Response Headers (Strictly Sanitized & ASCII-Safe)
+  // SECURITY (N3): Never include 'x-raw-upstream-error' or stack details in client headers
   const coreHeaders: Record<string, string> = {
     "x-zyka-sanitized-error": sanitizeHeaderValue(sanitizedError.userMessage),
     "x-zyka-error-code": sanitizeHeaderValue(errorCode),
     "x-zyka-middleware-processed": "true",
     "x-zyka-error-category": sanitizeHeaderValue(sanitizedError.category),
-    "x-raw-upstream-error": sanitizeHeaderValue(rawTechnicalMessage),
+    "x-zyka-trace-id": sanitizeHeaderValue(traceId),
   };
 
   // Step 6: Cumulative Header Budgeting & Forwarding Allowlist
@@ -120,10 +121,34 @@ export function interceptAndTranslateUpstreamError(
     }
   }
 
-  const enrichedHeaders: Record<string, string> = {
+  const rawEnrichedHeaders: Record<string, string> = {
     ...cleanUpstreamHeaders,
     ...coreHeaders,
   };
+
+  // SECURITY (N3): Enforce client-safe allowlist on response headers
+  const CLIENT_SAFE_RESPONSE_HEADERS = new Set([
+    "x-zyka-sanitized-error",
+    "x-zyka-error-code",
+    "x-zyka-error-category",
+    "x-zyka-middleware-processed",
+    "x-zyka-trace-id",
+    "retry-after",
+    "x-ratelimit-limit",
+    "x-ratelimit-remaining",
+    "x-ratelimit-reset",
+    "x-conflicting-prompt-ratio",
+    "x-selected-dropdown-ratio",
+    "x-conflicting-prompt-duration",
+    "x-selected-dropdown-duration",
+  ]);
+
+  const clientSafeHeaders: Record<string, string> = {};
+  for (const [k, v] of Object.entries(rawEnrichedHeaders)) {
+    if (CLIENT_SAFE_RESPONSE_HEADERS.has(k)) {
+      clientSafeHeaders[k] = v;
+    }
+  }
 
   return {
     statusCode: validStatus,
@@ -135,6 +160,6 @@ export function interceptAndTranslateUpstreamError(
       metadata: safePayload?.metadata,
     },
     sanitizedError,
-    responseHeaders: enrichedHeaders,
+    responseHeaders: clientSafeHeaders,
   };
 }

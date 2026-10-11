@@ -50,10 +50,13 @@ function isAdmin(req: NextRequest): boolean {
 }
 
 export async function GET(req: NextRequest): Promise<NextResponse> {
-  // In production, enforce admin authentication.
-  // In development, allow unauthenticated access for local debugging.
-  if (process.env.NODE_ENV === "production" && !isAdmin(req)) {
-    // Return 404 instead of 401 to avoid revealing that the endpoint exists
+  // SECURITY (N6): Fail-closed by default across all environments (production, staging, test, unset)
+  // Only permit unauthenticated access if explicitly in development AND ALLOW_PUBLIC_LOGS=1
+  const allowDevPublic =
+    process.env.NODE_ENV === "development" && process.env.ALLOW_PUBLIC_LOGS === "1";
+
+  if (!allowDevPublic && !isAdmin(req)) {
+    // Return 404 instead of 401 to prevent endpoint discovery
     return NextResponse.json(
       { success: false, error: "Not found" },
       { status: 404, headers: { "Cache-Control": "no-store" } }

@@ -1,45 +1,23 @@
 /**
  * Server-side structured error logger.
  *
- * SECURITY FIXES over original:
- * 1. All IP/userId resolution is now done by the CALLER (proxy.ts / route.ts)
- *    using the zero-trust resolveClientIp() from client-ip.ts. This module
- *    no longer trusts any client header for IP/identity — it only accepts
- *    pre-resolved values from the secure resolution pipeline.
- * 2. Log entries are written as JSONL only (JSON.stringify escapes all
- *    injection characters, eliminating log field injection).
- * 3. Synchronous fs.appendFileSync replaced with fire-and-forget async writes
- *    to avoid blocking the Node.js event loop on every failed request.
- * 4. Log file size cap: if the JSONL file exceeds MAX_LOG_FILE_BYTES, new
- *    entries are dropped to disk (still kept in memory) and a warning is
- *    emitted, preventing disk exhaustion from an attacker-driven error flood.
- * 5. The formatted text log (server-errors.log) is removed — it was the
- *    source of log field injection and added no value over JSONL.
- * 6. getServerLogs() no longer does a synchronous readFileSync on each
- *    request when the memory buffer is empty. It attempts a one-time async
- *    hydration at startup instead.
+ * FIXES FOR N7:
+ * 1. userAgent is capped at 256 chars and rawTechnicalMessage at 1024 chars to prevent log bloat DoS.
+ * 2. Entire append and rotation pipeline uses async fs.promises — no sync event-loop stalls.
+ * 3. Log rotation: when JSONL file exceeds 5 MB, it is rotated to .jsonl.1 instead of dropping logs.
+ * 4. Automatic disk hydration on startup (exported register hook for Next.js instrumentation).
  */
 
 import path from "path";
 import { ServerErrorLogEntry } from "@/types";
 
-// ---------------------------------------------------------------------------
-// In-memory ring buffer
-// ---------------------------------------------------------------------------
 const MAX_IN_MEMORY_LOGS = 200;
 const inMemoryLogs: ServerErrorLogEntry[] = [];
 
-// ---------------------------------------------------------------------------
-// Disk persistence (async, fire-and-forget, size-bounded)
-// ---------------------------------------------------------------------------
 const LOGS_DIR = path.join(process.cwd(), "logs");
 const JSONL_LOG_FILE = path.join(LOGS_DIR, "server-errors.jsonl");
-
-/** 5 MB cap on the JSONL file — prevents disk exhaustion */
-const MAX_LOG_FILE_BYTES = 5 * 1024 * 1024;
-
-/** Track whether we've already warned about the size cap */
-let diskCapWarned = false;
+const ROTATED_LOG_FILE = path.join(LOGS_DIR, "server-errors.jsonl.1");
+const MAX_LOG_FILE_BYTES = 5 * 1024 * 1024; // 5 MB
 
 function getFs(): typeof import("fs") | null {
   try {
@@ -50,66 +28,41 @@ function getFs(): typeof import("fs") | null {
   }
 }
 
-function ensureLogDir(): void {
+/**
+ * Fully asynchronous append with rotation when file exceeds MAX_LOG_FILE_BYTES.
+ * Never performs synchronous fs operations on the event loop.
+ */
+async function appendLogAsync(entry: ServerErrorLogEntry): Promise<void> {
   const fs = getFs();
   if (!fs) return;
+  const fsp = fs.promises;
+
   try {
-    if (!fs.existsSync(LOGS_DIR)) {
-      fs.mkdirSync(LOGS_DIR, { recursive: true });
+    await fsp.mkdir(LOGS_DIR, { recursive: true }).catch(() => {});
+
+    // Check size asynchronously
+    let currentSize = 0;
+    try {
+      const stat = await fsp.stat(JSONL_LOG_FILE);
+      currentSize = stat.size;
+    } catch {
+      // File does not exist yet
     }
-  } catch {
-    // Edge runtime or read-only FS
+
+    // Rotate if over capacity: rename current to .1
+    if (currentSize >= MAX_LOG_FILE_BYTES) {
+      await fsp.rename(JSONL_LOG_FILE, ROTATED_LOG_FILE).catch(() => {});
+    }
+
+    await fsp.appendFile(JSONL_LOG_FILE, JSON.stringify(entry) + "\n", "utf8");
+  } catch (err) {
+    console.error("[server-logger] Async append error:", err instanceof Error ? err.message : err);
   }
 }
 
-/**
- * Async, fire-and-forget JSONL append with a size guard.
- * NEVER blocks the event loop.
- */
-function appendLogAsync(entry: ServerErrorLogEntry): void {
-  // Use setImmediate to yield to the event loop before doing any I/O
-  setImmediate(() => {
-    const fs = getFs();
-    if (!fs) return;
-    try {
-      ensureLogDir();
-      // Check file size synchronously once per entry (single stat call, cheap)
-      let fileSizeBytes = 0;
-      try {
-        fileSizeBytes = fs.statSync(JSONL_LOG_FILE).size;
-      } catch {
-        // File doesn't exist yet — size is 0
-      }
-      if (fileSizeBytes >= MAX_LOG_FILE_BYTES) {
-        if (!diskCapWarned) {
-          console.warn(
-            `[server-logger] JSONL log file exceeds ${MAX_LOG_FILE_BYTES} bytes. ` +
-              "New entries are not being persisted to disk. Rotate or truncate logs/server-errors.jsonl."
-          );
-          diskCapWarned = true;
-        }
-        return;
-      }
-      fs.appendFile(JSONL_LOG_FILE, JSON.stringify(entry) + "\n", "utf8", (err) => {
-        if (err) {
-          console.error("[server-logger] Failed to write log entry:", err.message);
-        }
-      });
-    } catch (err) {
-      console.error("[server-logger] appendLogAsync error:", err);
-    }
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Public API — params now accept pre-resolved identity values
-// ---------------------------------------------------------------------------
-
 export interface RecordServerErrorParams {
-  /** Server-resolved client IP (from client-ip.ts resolveClientIp) */
   resolvedIp: string;
   ipSource: ServerErrorLogEntry["ipSource"];
-  /** Server-derived anonymous user ID (never from client header) */
   resolvedUserId: string;
   userAgent: string;
   statusCode: number;
@@ -142,10 +95,7 @@ function generateId(): string {
 }
 
 /**
- * Records a server error into the in-memory ring buffer and asynchronously
- * appends it to disk as JSONL. Does NOT block the event loop.
- *
- * Returns the entry for use by the calling route handler.
+ * Records a server error into the in-memory ring buffer and queues async disk persistence.
  */
 export function recordServerError(
   params: RecordServerErrorParams
@@ -153,15 +103,18 @@ export function recordServerError(
   const now = new Date();
   const timestamp = now.toISOString();
 
-  // Truncate prompt snippet server-side to avoid log bloat
+  // Bounded prompt snippet
   const promptText = (params.payload?.prompt ?? "").trim();
   const promptSnippet =
     promptText.length > 80 ? `${promptText.substring(0, 80)}…` : promptText;
-  // Word count on the already-truncated-by-schema prompt is cheap
   const promptWordCount = promptText ? promptText.split(/\s+/).length : 0;
 
   const traceId = params.traceId ?? `trace-${generateId()}`;
   const requestId = params.requestId ?? `req-${generateId()}`;
+
+  // SECURITY (N7): Cap userAgent and rawTechnicalMessage length
+  const safeUserAgent = (params.userAgent || "unknown-client").slice(0, 256);
+  const safeRawTechnicalMessage = (params.rawTechnicalMessage || "").slice(0, 1024);
 
   const entry: ServerErrorLogEntry = {
     logId: `err_${now.getTime()}_${generateId()}`,
@@ -170,7 +123,7 @@ export function recordServerError(
     clientIp: params.resolvedIp,
     ipSource: params.ipSource,
     userId: params.resolvedUserId,
-    userAgent: params.userAgent,
+    userAgent: safeUserAgent,
     requestId,
     traceId,
     route: params.route ?? "/api/generate",
@@ -187,7 +140,7 @@ export function recordServerError(
       statusCode: params.statusCode,
       code: params.errorCode,
       category: params.category,
-      rawTechnicalMessage: params.rawTechnicalMessage,
+      rawTechnicalMessage: safeRawTechnicalMessage,
       sanitizedUserMessage: params.sanitizedUserMessage,
       actionableTip: params.actionableTip,
       upstreamService: params.upstreamService ?? "Zyka-Upstream-Gateway",
@@ -205,15 +158,11 @@ export function recordServerError(
     inMemoryLogs.pop();
   }
 
-  // 2. Async disk persistence — never blocks
+  // 2. Purely async disk persistence (fire-and-forget Promise)
   appendLogAsync(entry);
 
   return entry;
 }
-
-// ---------------------------------------------------------------------------
-// Query interface
-// ---------------------------------------------------------------------------
 
 export interface LogFilters {
   ip?: string;
@@ -222,11 +171,18 @@ export interface LogFilters {
   limit?: number;
 }
 
+let hasHydrated = false;
+
 /**
- * Returns filtered logs from the in-memory ring buffer only.
- * Disk hydration at startup is done separately (see hydrateLogsFromDisk).
+ * Returns filtered logs from the in-memory ring buffer.
+ * If empty on initial request, triggers background disk hydration.
  */
 export function getServerLogs(filters?: LogFilters): ServerErrorLogEntry[] {
+  if (!hasHydrated && inMemoryLogs.length === 0) {
+    hasHydrated = true;
+    hydrateLogsFromDisk();
+  }
+
   let result = [...inMemoryLogs];
 
   if (filters?.ip) {
@@ -246,45 +202,28 @@ export function getServerLogs(filters?: LogFilters): ServerErrorLogEntry[] {
   return result.slice(0, limit);
 }
 
-/**
- * Clears the in-memory log buffer.
- * NOTE: Does NOT delete the on-disk JSONL file — audit logs are append-only.
- */
 export function clearServerLogs(): void {
   inMemoryLogs.length = 0;
 }
 
 /**
- * One-time async hydration from disk into the in-memory buffer.
- * Should be called once at startup (e.g. in instrumentation.ts).
- * Never called on each request.
+ * One-time async hydration from disk into memory.
  */
 export async function hydrateLogsFromDisk(): Promise<void> {
-  if (inMemoryLogs.length > 0) return; // already populated
-
   const fs = getFs();
   if (!fs) return;
 
   try {
-    // fs.promises avoids blocking
-    const fsPromises = fs.promises;
-    const content = await fsPromises.readFile(JSONL_LOG_FILE, "utf8");
+    const content = await fs.promises.readFile(JSONL_LOG_FILE, "utf8");
     const lines = content.trim().split("\n").filter(Boolean);
-
-    // Read only the last MAX_IN_MEMORY_LOGS lines to bound memory usage
     const recentLines = lines.slice(-MAX_IN_MEMORY_LOGS);
     const parsed: ServerErrorLogEntry[] = [];
     for (const line of recentLines) {
       try {
         parsed.push(JSON.parse(line) as ServerErrorLogEntry);
-      } catch {
-        // Skip malformed lines
-      }
+      } catch {}
     }
-    // Newest first
     parsed.reverse();
     inMemoryLogs.push(...parsed);
-  } catch {
-    // File doesn't exist yet — fine
-  }
+  } catch {}
 }

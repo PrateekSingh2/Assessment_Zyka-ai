@@ -1,22 +1,23 @@
 /**
  * Zero-Trust Sliding-Window Rate Limiter
  *
- * SECURITY FIXES over original:
- * 1. Uses Map instead of plain `{}` — eliminates __proto__ / constructor /
- *    toString prototype pollution crashes (TypeError: windowStore[key].filter
- *    is not a function).
- * 2. Bounded at MAX_KEYS entries with a sweep on overflow — prevents OOM from
- *    attacker rotating spoofed IPs (500k keys ≈ 146 MB in original).
- * 3. Returns readonly result to prevent accidental mutation by callers.
- * 4. Sets Retry-After semantics via resetSeconds on the result.
- *
- * For multi-instance / production use replace with Redis + sliding-window Lua.
+ * FIXES FOR N2:
+ * 1. Uses Map with LRU-style eviction on capacity overflow: when MAX_KEYS is reached,
+ *    evicts the oldest Map entry (insertion order) instead of failing closed and locking
+ *    out all legitimate new users.
+ * 2. IPv6 addresses are bucketed by /64 prefix to prevent single residential connection flooding.
+ * 3. Sweeping is throttled to at most once every 10 seconds, preventing 50,000-key synchronous
+ *    event-loop CPU stalls on every request.
  */
 
-const MAX_KEYS = 50_000;
+import { getIpSubnetKey } from "./client-ip.ts";
 
-// Map has no prototype keys — safe to key on attacker-controlled strings
+const MAX_KEYS = 50_000;
+const SWEEP_INTERVAL_MS = 10_000;
+
+// Map maintains insertion order, enabling O(1) LRU eviction
 const store = new Map<string, number[]>();
+let lastSweepTime = 0;
 
 export interface RateLimitResult {
   readonly success: boolean;
@@ -27,10 +28,13 @@ export interface RateLimitResult {
 }
 
 /**
- * Evict stale entries to reclaim memory.
- * Called only when store.size >= MAX_KEYS.
+ * Evict stale entries across the store. Throttled to at most once per SWEEP_INTERVAL_MS.
  */
-function sweep(now: number, windowMs: number): void {
+function throttledSweep(now: number, windowMs: number): void {
+  if (now - lastSweepTime < SWEEP_INTERVAL_MS) {
+    return;
+  }
+  lastSweepTime = now;
   for (const [k, timestamps] of store) {
     const fresh = timestamps.filter((t) => t > now - windowMs);
     if (fresh.length === 0) {
@@ -43,35 +47,31 @@ function sweep(now: number, windowMs: number): void {
 
 /**
  * Checks a sliding-window rate limit for `key`.
- *
- * @param key     Opaque rate-limit bucket identifier (e.g. resolved client IP)
- * @param limit   Maximum requests allowed in `windowMs`
- * @param windowMs Window duration in milliseconds (default 60 s)
+ * Key is automatically normalized (IPv6 collapsed to /64).
  */
 export function checkSlidingWindowRateLimit(
-  key: string,
+  rawKey: string,
   limit = 5,
   windowMs = 60_000
 ): RateLimitResult {
   const now = Date.now();
+  // Aggregate IP to subnet bucket (IPv4: /32, IPv6: /64)
+  const key = getIpSubnetKey(rawKey);
 
-  // Bounded capacity guard — sweep before admitting new keys
+  // Periodic throttled sweep
+  throttledSweep(now, windowMs);
+
+  // If store is at capacity, evict the oldest inserted key (LRU) to accommodate newcomer
   if (store.size >= MAX_KEYS && !store.has(key)) {
-    sweep(now, windowMs);
-    // Still at capacity after sweep — fail closed on unknown keys
-    if (store.size >= MAX_KEYS) {
-      return {
-        success: false,
-        limit,
-        remaining: 0,
-        resetSeconds: Math.ceil(windowMs / 1000),
-        currentCount: limit,
-      };
+    const oldestKey = store.keys().next().value;
+    if (oldestKey) {
+      store.delete(oldestKey);
     }
   }
 
-  // Filter out timestamps outside the current window
-  const current = (store.get(key) ?? []).filter((t) => t > now - windowMs);
+  // Filter timestamps in the active window
+  const timestamps = store.get(key);
+  const current = timestamps ? timestamps.filter((t) => t > now - windowMs) : [];
 
   if (current.length >= limit) {
     store.set(key, current);
@@ -90,6 +90,8 @@ export function checkSlidingWindowRateLimit(
   }
 
   current.push(now);
+  // Re-insert to refresh LRU order
+  store.delete(key);
   store.set(key, current);
 
   const oldestInWindow = current[0] ?? now;
@@ -105,4 +107,10 @@ export function checkSlidingWindowRateLimit(
     resetSeconds,
     currentCount: current.length,
   };
+}
+
+/** Test utility to reset rate limiter in unit tests */
+export function resetRateLimiter(): void {
+  store.clear();
+  lastSweepTime = 0;
 }

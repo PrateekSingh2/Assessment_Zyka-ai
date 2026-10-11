@@ -125,10 +125,6 @@ export default function Home() {
       "x-zyka-model": payload.model || "Auto (Best model)",
       "x-zyka-request-id": requestId,
       "x-zyka-client-timestamp": new Date().toISOString(),
-      "x-zyka-client-public-ip": realIp,
-      "x-zyka-real-ip": realIp,
-      "x-zyka-user-id": username,
-      "x-zyka-username": username,
     };
 
     // DevTools Inspector display representation (includes HTTP/2 pseudo-headers for telemetry)
@@ -161,9 +157,10 @@ export default function Home() {
       setResponsePayload(json);
 
       // Extract authoritative IP recorded in the server-level error log or telemetry headers
+      // Extract authoritative server-verified IP from response headers
       const serverReportedIp =
-        incomingHeaders["x-zyka-real-ip"] ||
-        json.serverLog?.clientIp;
+        incomingHeaders["x-zyka-resolved-ip"] ||
+        incomingHeaders["x-zyka-real-ip"];
       const isLoopbackVal = (val?: string) =>
         !val || val === "::1" || val === "127.0.0.1" || val.startsWith("127.");
 
@@ -174,58 +171,34 @@ export default function Home() {
 
       if (serverReportedIp && !isLoopbackVal(serverReportedIp) && serverReportedIp !== realIp) {
         setRealIp(serverReportedIp);
-        const serverSource = incomingHeaders["x-zyka-ip-source"] || json.serverLog?.ipSource;
-        if (serverSource) {
-          setIpSource(
-            serverSource === "client-public-wan"
-              ? "Public WAN"
-              : serverSource === "system-lan-interface"
-              ? "Local LAN"
-              : serverSource === "cf-connecting-ip"
-              ? "Cloudflare CDN"
-              : "Verified IP"
-          );
-        }
+        setIpSource("Gateway Verified");
       }
 
       if (!res.ok || !json.success) {
-        // Extract raw technical error from headers or JSON
-        const rawTechnicalMsg =
-          incomingHeaders["x-raw-upstream-error"]
-            ? decodeURIComponent(incomingHeaders["x-raw-upstream-error"])
-            : json.rawError?.technicalMessage || "Unknown upstream failure";
+        const traceId = json.traceId || incomingHeaders["x-zyka-trace-id"] || requestId;
 
-        const rawErr: UpstreamErrorDetail = {
-          code:
-            incomingHeaders["x-upstream-error-code"] ||
-            json.rawError?.code ||
-            "ERR_GENERIC",
-          technicalMessage: rawTechnicalMsg,
-          upstreamService:
-            incomingHeaders["x-upstream-service"] ||
-            json.rawError?.upstreamService ||
-            "Upstream-Worker",
-          traceId:
-            incomingHeaders["x-upstream-trace-id"] ||
-            json.rawError?.traceId ||
-            requestId,
-        };
-
-        // Extract sanitized human-readable message from headers or JSON
+        // Extract sanitized human-readable message from unified error response or headers
         const sanitizedMsg =
-          incomingHeaders["x-zyka-sanitized-error"] ||
           json.sanitizedError?.userMessage ||
+          incomingHeaders["x-zyka-sanitized-error"] ||
           "An error occurred during generation.";
 
         const cleanErr: SanitizedErrorDetail = {
           userMessage: sanitizedMsg,
-          category: json.sanitizedError?.category || "SYSTEM",
+          category: json.sanitizedError?.category || (incomingHeaders["x-zyka-error-category"] as SanitizedErrorDetail["category"]) || "SYSTEM",
           actionableTip:
             json.sanitizedError?.actionableTip || "Please review your prompt.",
           suggestedService: json.sanitizedError?.suggestedService,
           suggestedRatio: json.sanitizedError?.suggestedRatio,
           suggestedDuration: json.sanitizedError?.suggestedDuration,
           actionLabel: json.sanitizedError?.actionLabel,
+        };
+
+        const rawErr: UpstreamErrorDetail = {
+          code: incomingHeaders["x-zyka-error-code"] || "ERR_GATEWAY",
+          technicalMessage: `Request failed with HTTP ${res.status}. TraceID: ${traceId}`,
+          upstreamService: "Zyka-Gateway",
+          traceId,
         };
 
         setRawError(rawErr);

@@ -8,8 +8,8 @@
 import { z } from "zod";
 
 // Hard byte cap enforced BEFORE JSON.parse allocates memory.
-// 8,000 chars ≈ 1,000 words @ avg 8 chars/word, with margin.
-export const MAX_BODY_BYTES = 16_384; // 16 KB
+// 32 KB accommodates 8,000 multi-byte UTF-8 characters (e.g. Hindi, Japanese, Emoji)
+export const MAX_BODY_BYTES = 32_768; // 32 KB
 
 export const VALID_MEDIA_TYPES = ["image", "video", "audio", "voice"] as const;
 export const VALID_DURATIONS = ["2s", "5s", "10s", "15s", "30s"] as const;

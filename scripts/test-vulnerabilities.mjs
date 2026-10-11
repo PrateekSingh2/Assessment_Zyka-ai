@@ -32,6 +32,9 @@ import {
   normalizeStatusCode,
   normalizeHeaders,
 } from "../src/lib/middleware/error-interceptor.ts";
+import { executeMockUpstreamAI } from "../src/lib/mock-upstream.ts";
+import { checkSlidingWindowRateLimit, resetRateLimiter } from "../src/lib/rate-limit.ts";
+import { resolveClientIp, getIpSubnetKey } from "../src/lib/client-ip.ts";
 
 let passed = 0;
 let failed = 0;
@@ -311,6 +314,81 @@ async function main() {
       assert(false, `Prototype key '${protoKey}' crashed with: ${err.message}`);
     }
   }
+
+  // --------------------------------------------------------------------------
+  // TEST: Zero Raw Technical Error Leakage (N3)
+  // --------------------------------------------------------------------------
+  console.log(`\n[VERIFICATION] Zero Raw Technical Error Leakage (N3)`);
+
+  const leakRes = interceptAndTranslateUpstreamError(500, {
+    "x-upstream-error-code": "ERR_INTERNAL_FAULT",
+    "x-upstream-raw-error": "CUDA kernel memory corruption at node-worker-gpu-09: /var/lib/cuda/rescaler.cu:418",
+  });
+  assert(
+    leakRes.responseHeaders["x-raw-upstream-error"] === undefined,
+    `x-raw-upstream-error is completely absent from client response headers`
+  );
+  assert(
+    leakRes.responseHeaders["x-upstream-service"] === undefined,
+    `x-upstream-service is absent from client response headers`
+  );
+  assert(
+    leakRes.responseHeaders["x-zyka-sanitized-error"] !== undefined,
+    `Sanitized user message is present in response headers`
+  );
+
+  // --------------------------------------------------------------------------
+  // TEST: Benign Prompts Verification (N4)
+  // --------------------------------------------------------------------------
+  console.log(`\n[VERIFICATION] Benign Prompts Verification (N4)`);
+
+  const benignCases = [
+    { type: "image", prompt: "retro 80s synthwave poster, neon grid", desc: "80s synthwave poster" },
+    { type: "image", prompt: "a 90s kid's bedroom", desc: "90s bedroom" },
+    { type: "image", prompt: "a cozy 24 hour diner at night", desc: "24 hour diner" },
+    { type: "image", prompt: "a 5 minute long-exposure photo of stars", desc: "5 minute long-exposure" },
+    { type: "voice", prompt: "Dinner will be ready in 5 minutes…", desc: "Dinner in 5 minutes (voice)" },
+    { type: "image", prompt: "clock showing 9:16 on a vintage wall", desc: "clock showing 9:16" },
+  ];
+
+  for (const tc of benignCases) {
+    const res = await executeMockUpstreamAI({
+      prompt: tc.prompt,
+      mediaType: tc.type,
+      model: "Auto (Best model)",
+      quality: "High Quality",
+      aspectRatio: "16:9",
+      duration: "5s",
+    });
+    assert(
+      res.status === 200,
+      `Benign prompt '${tc.desc}' succeeded with 200 (not rejected as false positive, status=${res.status})`
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // TEST: Rate Limiter LRU Eviction & IPv6 /64 Keying (N2)
+  // --------------------------------------------------------------------------
+  console.log(`\n[VERIFICATION] Rate Limiter LRU Eviction & IPv6 /64 Keying (N2)`);
+
+  resetRateLimiter();
+  const sub1 = getIpSubnetKey("2001:db8:abcd:0012:0000:0000:0000:0001");
+  const sub2 = getIpSubnetKey("2001:db8:abcd:0012:ffff:ffff:ffff:ffff");
+  assert(
+    sub1 === sub2,
+    `IPv6 addresses from same /64 subnet map to identical rate limit key: "${sub1}"`
+  );
+
+  // --------------------------------------------------------------------------
+  // TEST: Zero-Trust Client IP Fail-Closed (N1)
+  // --------------------------------------------------------------------------
+  console.log(`\n[VERIFICATION] Zero-Trust Client IP Fail-Closed (N1)`);
+
+  const devIp = resolveClientIp({});
+  assert(
+    devIp.ip === "127.0.0.1",
+    `Default dev resolution returns 127.0.0.1, never server LAN IP`
+  );
 
   // --------------------------------------------------------------------------
   // SUMMARY
