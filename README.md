@@ -144,14 +144,11 @@ Assessment_Zyka-ai/
 │   ├── proxy.ts                     # Next.js 16 Edge Proxy (Sliding Window & Guard)
 │   └── types/
 │       └── index.ts                 # Shared TypeScript interfaces
-├── logs/
-│   ├── server-errors.log            # Formatted human-readable server error log
-│   └── server-errors.jsonl          # Structured JSON Lines log for SIEM/Datadog
 ├── scripts/
 │   ├── test-suite.mjs               # Automated QA functional suite (12 tests)
 │   ├── stress-test.mjs              # Adversarial stress test suite (74 tests)
 │   └── test-server-logs.mjs         # Real-IP & user audit test suite (30 assertions)
-├── logs.txt                         # Detailed QA audit logs & stress test records
+├── logs/                            # Runtime server logs (generated on execution, gitignored)
 ├── package.json
 └── README.md
 ```

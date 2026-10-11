@@ -43,14 +43,74 @@ function ensureLogDir(): void {
 }
 
 /**
+ * Checks whether an IP address is a localhost/loopback address
+ */
+export function isLoopbackIp(ip?: string | null): boolean {
+  if (!ip) return true;
+  const trimmed = ip.trim().toLowerCase();
+  return (
+    trimmed === "::1" ||
+    trimmed === "127.0.0.1" ||
+    trimmed === "localhost" ||
+    trimmed === "0.0.0.0" ||
+    trimmed === "::" ||
+    trimmed === "unknown" ||
+    trimmed.startsWith("127.") ||
+    trimmed === "::ffff:127.0.0.1" ||
+    trimmed.startsWith("::ffff:127.") ||
+    trimmed.startsWith("fe80:")
+  );
+}
+
+/**
+ * Normalizes an IP string (strips IPv4-mapped IPv6 prefix ::ffff:)
+ */
+export function normalizeIp(ip: string): string {
+  let cleaned = ip.trim();
+  if (cleaned.startsWith("::ffff:")) {
+    cleaned = cleaned.substring(7);
+  }
+  return cleaned;
+}
+
+/**
+ * Safely resolves the host machine's active non-internal IPv4 LAN IP
+ */
+export function getSystemLanIp(): string | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const os = require("os");
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+      const netList = interfaces[name];
+      if (!netList) continue;
+      for (const net of netList) {
+        // Skip internal/loopback and non-IPv4 addresses
+        if (net.family === "IPv4" && !net.internal && !isLoopbackIp(net.address)) {
+          return net.address;
+        }
+      }
+    }
+  } catch {
+    // Fallback if in Edge or restricted environment
+  }
+  return null;
+}
+
+/**
  * Enterprise Real-IP Extraction:
  * Evaluates proxy headers in accordance with RFC 7239 and Cloudflare/Nginx/AWS standards.
+ * When tested locally on localhost, prevents logging loopback (::1 or 127.0.0.1) by inspecting
+ * the client-discovered public WAN IP (x-zyka-client-public-ip) or active host LAN interface.
+ *
  * Priority:
- * 1. cf-connecting-ip (Cloudflare)
+ * 1. cf-connecting-ip (Cloudflare Edge CDN)
  * 2. true-client-ip (Akamai / Cloudflare Enterprise)
  * 3. x-real-ip (Standard Nginx Reverse Proxy)
- * 4. x-forwarded-for (First untrusted hop / client origin IP)
- * 5. Fallback loopback
+ * 4. x-forwarded-for (Client origin IP if non-loopback)
+ * 5. x-zyka-client-public-ip / x-zyka-real-ip (Client public WAN IP discovery via ipify)
+ * 6. Active host LAN network interface (e.g. 10.56.x.x / 192.168.x.x)
+ * 7. Fallback (127.0.0.1)
  */
 export function extractRealClientIp(
   headers: Headers | Record<string, string>
@@ -63,35 +123,70 @@ export function extractRealClientIp(
     return record[name] || record[name.toLowerCase()] || null;
   };
 
+  // 0. Upstream edge proxy resolved IP & source (passes through edge proxy decisions)
+  const proxyRealIp = getHeader("x-zyka-real-ip");
+  const proxyIpSource = getHeader("x-zyka-ip-source") as ServerErrorLogEntry["ipSource"] | null;
+  if (proxyRealIp && proxyIpSource && !isLoopbackIp(proxyRealIp)) {
+    return { ip: normalizeIp(proxyRealIp), source: proxyIpSource };
+  }
+
   // 1. Cloudflare Connecting IP
   const cfIp = getHeader("cf-connecting-ip");
   if (cfIp && cfIp.trim()) {
-    return { ip: cfIp.trim(), source: "cf-connecting-ip" };
+    const norm = normalizeIp(cfIp);
+    if (!isLoopbackIp(norm)) {
+      return { ip: norm, source: "cf-connecting-ip" };
+    }
   }
 
   // 2. Akamai / Cloudflare Enterprise True Client IP
   const trueClientIp = getHeader("true-client-ip");
   if (trueClientIp && trueClientIp.trim()) {
-    return { ip: trueClientIp.trim(), source: "true-client-ip" };
+    const norm = normalizeIp(trueClientIp);
+    if (!isLoopbackIp(norm)) {
+      return { ip: norm, source: "true-client-ip" };
+    }
   }
 
   // 3. Nginx / Ingress X-Real-IP
   const realIp = getHeader("x-real-ip");
   if (realIp && realIp.trim()) {
-    return { ip: realIp.trim(), source: "x-real-ip" };
-  }
-
-  // 4. X-Forwarded-For: Client IP is the first entry in comma-separated chain
-  const xForwardedFor = getHeader("x-forwarded-for");
-  if (xForwardedFor && xForwardedFor.trim()) {
-    const parts = xForwardedFor.split(",").map((p) => p.trim());
-    const candidate = parts[0];
-    if (candidate) {
-      return { ip: candidate, source: "x-forwarded-for" };
+    const norm = normalizeIp(realIp);
+    if (!isLoopbackIp(norm)) {
+      return { ip: norm, source: "x-real-ip" };
     }
   }
 
-  // 5. Fallback
+  // 4. X-Forwarded-For: Check for valid non-loopback client IP
+  const xForwardedFor = getHeader("x-forwarded-for");
+  if (xForwardedFor && xForwardedFor.trim()) {
+    const parts = xForwardedFor.split(",").map((p) => normalizeIp(p.trim())).filter(Boolean);
+    const nonLoopback = parts.find((p) => !isLoopbackIp(p));
+    if (nonLoopback) {
+      return { ip: nonLoopback, source: "x-forwarded-for" };
+    }
+  }
+
+  // 5. Client Public WAN IP header discovered by browser (e.g. api.ipify.org)
+  const clientPublicIp =
+    getHeader("x-zyka-client-public-ip") ||
+    getHeader("x-zyka-real-ip") ||
+    getHeader("x-client-public-ip") ||
+    getHeader("x-client-ip");
+  if (clientPublicIp && clientPublicIp.trim()) {
+    const norm = normalizeIp(clientPublicIp);
+    if (!isLoopbackIp(norm)) {
+      return { ip: norm, source: "client-public-wan" };
+    }
+  }
+
+  // 6. Host System LAN Interface Discovery (for local dev server without public header)
+  const systemLan = getSystemLanIp();
+  if (systemLan && !isLoopbackIp(systemLan)) {
+    return { ip: systemLan, source: "system-lan-interface" };
+  }
+
+  // 7. Ultimate fallback
   return { ip: "127.0.0.1", source: "remote-addr-fallback" };
 }
 
@@ -276,6 +371,28 @@ export function getServerLogs(filters?: {
   limit?: number;
 }): ServerErrorLogEntry[] {
   let result = [...inMemoryLogs];
+
+  // If in-memory buffer is empty (e.g. worker isolation or hot reload), hydrate from persistent disk file
+  if (result.length === 0) {
+    try {
+      const fs = getFs();
+      if (fs && fs.existsSync(JSONL_LOG_FILE)) {
+        const fileContent = fs.readFileSync(JSONL_LOG_FILE, "utf8");
+        const lines = fileContent.trim().split("\n").filter(Boolean);
+        const diskLogs = lines
+          .map((l: string) => {
+            try {
+              return JSON.parse(l);
+            } catch {
+              return null;
+            }
+          })
+          .filter(Boolean)
+          .reverse(); // Newest first
+        result = diskLogs as ServerErrorLogEntry[];
+      }
+    } catch {}
+  }
 
   if (filters?.ip) {
     result = result.filter((l) =>

@@ -59,19 +59,39 @@ export function InternalsInspector({
     setTimeout(() => setCopiedSection(null), 1500);
   };
 
-  const realClientIp =
+  // Enterprise Real IP extraction: Prioritizes the exact IP recorded in the server-level error log
+  const isLoopback = (ip?: string | null) =>
+    !ip ||
+    ip === "::1" ||
+    ip === "127.0.0.1" ||
+    ip === "localhost" ||
+    ip.startsWith("127.") ||
+    ip === "::ffff:127.0.0.1";
+
+  const rawClientIp =
+    responsePayload?.serverLog?.clientIp ||
     responseHeaders["x-zyka-real-ip"] ||
     requestHeaders["x-zyka-real-ip"] ||
-    responsePayload?.serverLog?.clientIp ||
+    requestHeaders["x-zyka-client-public-ip"] ||
     null;
+
+  // If server candidate is loopback, fallback to client-discovered public WAN IP if present
+  const realClientIp =
+    isLoopback(rawClientIp) &&
+    requestHeaders["x-zyka-client-public-ip"] &&
+    !isLoopback(requestHeaders["x-zyka-client-public-ip"])
+      ? requestHeaders["x-zyka-client-public-ip"]
+      : rawClientIp;
+
   const ipSource =
-    responseHeaders["x-zyka-ip-source"] ||
     responsePayload?.serverLog?.ipSource ||
-    null;
+    responseHeaders["x-zyka-ip-source"] ||
+    (realClientIp && isLoopback(rawClientIp) ? "client-public-wan" : null);
+
   const resolvedUserId =
+    responsePayload?.serverLog?.userId ||
     responseHeaders["x-zyka-user-id"] ||
     requestHeaders["x-zyka-user-id"] ||
-    responsePayload?.serverLog?.userId ||
     null;
   const serverLogData = responsePayload?.serverLog || null;
   const serverLogJson = serverLogData

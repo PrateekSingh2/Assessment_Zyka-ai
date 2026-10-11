@@ -134,6 +134,7 @@ export default function Home() {
       "x-zyka-request-id": requestId,
       "x-zyka-client-timestamp": new Date().toISOString(),
       "x-zyka-client-public-ip": realIp,
+      "x-zyka-real-ip": realIp,
       "x-zyka-user-id": username,
       "x-zyka-username": username,
     };
@@ -166,6 +167,34 @@ export default function Home() {
 
       const json = await res.json();
       setResponsePayload(json);
+
+      // Extract authoritative IP recorded in the server-level error log or telemetry headers
+      const serverReportedIp =
+        incomingHeaders["x-zyka-real-ip"] ||
+        json.serverLog?.clientIp;
+      const isLoopbackVal = (val?: string) =>
+        !val || val === "::1" || val === "127.0.0.1" || val.startsWith("127.");
+
+      const activeRealIp =
+        serverReportedIp && !isLoopbackVal(serverReportedIp)
+          ? serverReportedIp
+          : realIp;
+
+      if (serverReportedIp && !isLoopbackVal(serverReportedIp) && serverReportedIp !== realIp) {
+        setRealIp(serverReportedIp);
+        const serverSource = incomingHeaders["x-zyka-ip-source"] || json.serverLog?.ipSource;
+        if (serverSource) {
+          setIpSource(
+            serverSource === "client-public-wan"
+              ? "Public WAN"
+              : serverSource === "system-lan-interface"
+              ? "Local LAN"
+              : serverSource === "cf-connecting-ip"
+              ? "Cloudflare CDN"
+              : "Verified IP"
+          );
+        }
+      }
 
       if (!res.ok || !json.success) {
         // Extract raw technical error from headers or JSON
@@ -211,12 +240,12 @@ export default function Home() {
         setSanitizedError(cleanErr);
         setError(cleanErr.userMessage);
 
-        // Record error in operations log
+        // Record error in operations log using exact server-recorded real IP
         recordOperationLog({
           type: res.status === 429 ? "RATE_LIMIT_ENGAGED" : "ERROR_INTERCEPTED",
           status: "ERROR",
           statusCode: res.status,
-          realIp,
+          realIp: activeRealIp,
           ipType: ipSource,
           username,
           mediaType: payload.mediaType,
@@ -238,12 +267,12 @@ export default function Home() {
           prompt: payload.prompt,
         });
 
-        // Record success in operations log
+        // Record success in operations log using exact server-recorded real IP
         recordOperationLog({
           type: "GENERATION_SUCCESS",
           status: "SUCCESS",
           statusCode: 200,
-          realIp,
+          realIp: activeRealIp,
           ipType: ipSource,
           username,
           mediaType: payload.mediaType,

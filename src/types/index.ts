@@ -86,6 +86,8 @@ export interface ServerErrorLogEntry {
     | "true-client-ip"
     | "x-real-ip"
     | "x-forwarded-for"
+    | "client-public-wan"
+    | "system-lan-interface"
     | "remote-addr-fallback";
   userId: string; // Authenticated user ID or deterministic client fingerprint
   userAgent: string;
