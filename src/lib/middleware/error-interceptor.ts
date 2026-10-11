@@ -37,8 +37,10 @@ const MAX_TOTAL_HEADERS_BYTES = 4096;
 /**
  * STRICT SECURITY ALLOWLIST: Permissible upstream headers forwarded through proxy layer.
  * Mitigates cumulative header stuffing attacks and proxy 431 crashes.
+ * ARCHITECTURAL RULE 3: Any upstream header not explicitly listed here is strictly dropped.
+ * (Wildcard 'x-zyka-' bypass has been completely eliminated).
  */
-const ALLOWED_UPSTREAM_HEADERS: ReadonlySet<string> = new Set([
+export const ALLOWED_UPSTREAM_HEADERS: ReadonlySet<string> = new Set([
   "x-upstream-error-code",
   "x-upstream-service",
   "x-upstream-trace-id",
@@ -61,7 +63,7 @@ const ALLOWED_UPSTREAM_HEADERS: ReadonlySet<string> = new Set([
 /**
  * STRICT RUNTIME LITERAL SETS: Prevents Blind Type Casting & Runtime Corruption.
  */
-const ALLOWED_ASPECT_RATIOS: ReadonlySet<string> = new Set([
+export const ALLOWED_ASPECT_RATIOS: ReadonlySet<string> = new Set([
   "1:1",
   "16:9",
   "9:16",
@@ -69,7 +71,7 @@ const ALLOWED_ASPECT_RATIOS: ReadonlySet<string> = new Set([
   "21:9",
 ]);
 
-const ALLOWED_DURATIONS: ReadonlySet<string> = new Set([
+export const ALLOWED_DURATIONS: ReadonlySet<string> = new Set([
   "2s",
   "5s",
   "10s",
@@ -77,41 +79,36 @@ const ALLOWED_DURATIONS: ReadonlySet<string> = new Set([
   "30s",
 ]);
 
-const ALLOWED_SERVICES: ReadonlySet<string> = new Set(["image", "video", "voice"]);
+export const ALLOWED_SERVICES: ReadonlySet<string> = new Set(["image", "video", "voice"]);
 
 /**
  * DANGEROUS KEYS: Blocked to prevent Prototype Pollution attacks.
  */
-const DANGEROUS_PROTO_KEYS: ReadonlySet<string> = new Set([
+export const DANGEROUS_PROTO_KEYS: ReadonlySet<string> = new Set([
   "__proto__",
   "constructor",
   "prototype",
 ]);
 
 /**
- * MITIGATION 4: XSS & Payload Injection via String Interpolation.
- * Encodes HTML entities (<, >, ", ', &) from dynamically extracted or user-controlled
- * variables before concatenating them into user-facing messages or retention tips.
+ * ARCHITECTURAL RULE 1: Eliminate Double-Escaping (XSS vs UI Degradation)
+ * Strictly removes <, >, {, }, =, (, ) to prevent HTML/payload injection while
+ * avoiding HTML entity encoding (&lt;, &gt;) that causes literal UI text degradation in React.
  */
-export function escapeHtml(str: unknown): string {
+export function stripDangerousChars(str: unknown): string {
   if (typeof str !== "string") return "";
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+  return str.replace(/[<>{}=()]/g, "").trim();
 }
 
 /**
- * MITIGATION 5: Prototype Pollution in Metadata.
- * Safely accesses metadata properties without traversing prototype chains.
- * Blocks poisoned keys (__proto__, constructor, prototype) and verifies own properties.
+ * ARCHITECTURAL RULE 5: Patch Type Leaks in Metadata
+ * Safely accesses metadata properties returning `unknown` (eliminating any-type leaks).
+ * Blocks poisoned prototype keys (__proto__, constructor, prototype) and verifies own properties.
  */
 export function getSafeMetadata(
   metadata: unknown,
   key: string
-): any {
+): unknown {
   if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
     return undefined;
   }
@@ -121,52 +118,68 @@ export function getSafeMetadata(
   if (!Object.prototype.hasOwnProperty.call(metadata, key)) {
     return undefined;
   }
-  return (metadata as Record<string, any>)[key];
+  return (metadata as Record<string, unknown>)[key];
 }
 
 /**
- * MITIGATION 2: Blind Type Casting (Runtime Corruption).
- * Validates untrusted dynamic strings against strict allowed AspectRatio literals.
- * Drops invalid or injected strings (<script>alert(1)</script>) to undefined.
+ * ARCHITECTURAL RULE 5: Safe String Extraction from Metadata
+ * Defensively extracts primitive strings, safely discarding accidental objects or arrays
+ * without interpolating '[object Object]' into user-facing messages.
  */
-export function validateAspectRatio(val: unknown): AspectRatio | undefined {
-  if (typeof val === "string" && ALLOWED_ASPECT_RATIOS.has(val.trim())) {
-    return val.trim() as AspectRatio;
+export function extractSafeString(val: unknown): string | undefined {
+  if (typeof val === "string") {
+    const trimmed = val.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+  if (typeof val === "number" || typeof val === "boolean") {
+    return String(val);
   }
   return undefined;
 }
 
 /**
- * MITIGATION 2: Blind Type Casting (Runtime Corruption).
- * Validates untrusted dynamic strings against strict allowed Duration literals.
+ * Runtime literal validation for AspectRatio union type.
+ * Drops invalid or injected strings to undefined.
+ */
+export function validateAspectRatio(val: unknown): AspectRatio | undefined {
+  if (typeof val === "string") {
+    const cleaned = stripDangerousChars(val);
+    if (ALLOWED_ASPECT_RATIOS.has(cleaned)) {
+      return cleaned as AspectRatio;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Runtime literal validation for Duration union type.
  * Drops invalid or injected strings to undefined.
  */
 export function validateDuration(val: unknown): Duration | undefined {
   if (typeof val === "string") {
-    const normalized = val.trim().toLowerCase();
-    if (ALLOWED_DURATIONS.has(normalized)) {
-      return normalized as Duration;
+    const cleaned = stripDangerousChars(val).toLowerCase();
+    if (ALLOWED_DURATIONS.has(cleaned)) {
+      return cleaned as Duration;
     }
   }
   return undefined;
 }
 
 /**
- * MITIGATION 2: Blind Type Casting (Runtime Corruption).
- * Validates untrusted dynamic strings against strict allowed Service literals.
+ * Runtime literal validation for Service union type.
  */
 export function validateService(val: unknown): "image" | "video" | "voice" | undefined {
   if (typeof val === "string") {
-    const normalized = val.trim().toLowerCase();
-    if (ALLOWED_SERVICES.has(normalized)) {
-      return normalized as "image" | "video" | "voice";
+    const cleaned = stripDangerousChars(val).toLowerCase();
+    if (ALLOWED_SERVICES.has(cleaned)) {
+      return cleaned as "image" | "video" | "voice";
     }
   }
   return undefined;
 }
 
 /**
- * MITIGATION 6: Status Code Sanity Checks.
+ * Status Code Sanity Checks:
  * Coerces and clamps upstreamStatus to a valid integer in [100, 599].
  * Defaults safely to 500 if NaN, null, undefined, 0, or out of range.
  */
@@ -179,9 +192,8 @@ export function normalizeStatusCode(status: unknown): number {
 }
 
 /**
- * MITIGATION 1 & 3: Null/Malformed Input Resilience & Header Case-Insensitivity.
- * Safely defaults malformed inputs (null, undefined, arrays, primitives) to a safe object,
- * and canonicalizes all header keys to lowercase to eliminate case-mismatch bypasses.
+ * Null/Malformed Input Resilience & Header Case-Insensitivity:
+ * Canonicalizes header keys to lowercase and drops dangerous prototype keys.
  */
 export function normalizeHeaders(
   rawHeaders: unknown
@@ -199,10 +211,8 @@ export function normalizeHeaders(
 }
 
 /**
- * PREVIOUSLY PATCHED (Preserved):
  * Safely performs bounded, shallow serialization of an object without
- * deep recursive traversal. Protects the Node.js event loop from DoS attacks
- * involving massive (50MB+) or circular upstream payloads.
+ * deep recursive traversal. Protects the Node.js event loop from DoS attacks.
  */
 function safeShallowSerialize(obj: object): string {
   try {
@@ -215,17 +225,19 @@ function safeShallowSerialize(obj: object): string {
       return `[${items.join(",")}]`;
     }
     const keys = Object.keys(obj).slice(0, 10);
-    const entries = keys.map((key) => {
-      if (DANGEROUS_PROTO_KEYS.has(key)) return null;
-      const v = (obj as Record<string, unknown>)[key];
-      const formattedVal =
-        v === null
-          ? "null"
-          : typeof v === "object"
-          ? "[Nested]"
-          : JSON.stringify(String(v).substring(0, 50));
-      return `${JSON.stringify(key)}:${formattedVal}`;
-    }).filter(Boolean);
+    const entries = keys
+      .map((key) => {
+        if (DANGEROUS_PROTO_KEYS.has(key)) return null;
+        const v = (obj as Record<string, unknown>)[key];
+        const formattedVal =
+          v === null
+            ? "null"
+            : typeof v === "object"
+            ? "[Nested]"
+            : JSON.stringify(String(v).substring(0, 50));
+        return `${JSON.stringify(key)}:${formattedVal}`;
+      })
+      .filter(Boolean);
     return `{${entries.join(",")}}`;
   } catch {
     return "[Object]";
@@ -233,7 +245,6 @@ function safeShallowSerialize(obj: object): string {
 }
 
 /**
- * PREVIOUSLY PATCHED (Preserved):
  * Sanitizes header values for safe, spec-compliant HTTP transport:
  * 1. Prevents Event Loop DoS: Bounded shallow serialization for objects
  * 2. Prevents HTTP Response Splitting: Converts CR/LF newlines to " | "
@@ -261,7 +272,6 @@ export function sanitizeHeaderValue(
 }
 
 /**
- * PREVIOUSLY PATCHED (Preserved):
  * Generates an RFC 4122 compliant collision-resistant trace ID using native Web Crypto API.
  * 100% Edge Runtime and Turbopack compatible (zero bundler-hostile require() calls).
  */
@@ -276,50 +286,42 @@ export function generateSecureTraceId(): string {
 
 /**
  * Staff-Level Zero-Trust Middleware Error Interceptor:
- * Intercepts upstream API responses, provides end-to-end resilience against
- * untrusted, corrupted, or malicious upstream data, and translates cryptic errors
- * into secure, sanitized, user-friendly guidance.
+ * Intercepts upstream API responses, translates cryptic technical errors into
+ * clean, sanitized creator guidance, and guarantees complete runtime security.
  */
 export function interceptAndTranslateUpstreamError(
   upstreamStatus: unknown,
   upstreamHeaders: unknown,
   errorPayload?: unknown
 ): ErrorTranslationResult {
-  // MITIGATION 6: Status Code Sanity Checks (Coerce, clamp 100-599, fallback to 500)
+  // Status Code Sanity Check: Coerce and clamp to [100, 599], default 500
   const validStatus = normalizeStatusCode(upstreamStatus);
 
-  // MITIGATION 1 & 3: Null/Malformed Input Resilience & Case-Insensitive Normalization
-  const safeRawHeaders: Record<string, string> =
-    upstreamHeaders && typeof upstreamHeaders === "object" && !Array.isArray(upstreamHeaders)
-      ? (upstreamHeaders as Record<string, string>)
-      : {};
-  const normalizedHeaders = normalizeHeaders(safeRawHeaders);
+  // ARCHITECTURAL RULE 4: Null/Malformed Input Resilience & Case-Insensitive Normalization
+  const normalizedHeaders = normalizeHeaders(upstreamHeaders);
 
-  // MITIGATION 3: Safe Payload Structural Validation
+  // Structural Validation on Payload: drop non-objects and arrays
   const safePayload =
     errorPayload && typeof errorPayload === "object" && !Array.isArray(errorPayload)
       ? (errorPayload as UpstreamErrorPayload)
       : undefined;
 
-  // Case-insensitive code extraction
+  // Case-Insensitive Field Extractions
   const errorCode =
     normalizedHeaders["x-upstream-error-code"] ||
     (typeof safePayload?.code === "string" ? safePayload.code : "") ||
     "ERR_UNKNOWN_UPSTREAM_FAILURE";
 
-  // Case-insensitive raw error extraction
   const rawTechnicalMessage =
     normalizedHeaders["x-upstream-raw-error"] ||
     (typeof safePayload?.technicalMessage === "string" ? safePayload.technicalMessage : "") ||
     `[ERROR] UnhandledUpstreamFaultException: Code 0x500 at gateway edge.\nTraceID: ${normalizedHeaders["x-upstream-trace-id"] || "trace-unknown"}`;
 
-  // Case-insensitive trace ID extraction
   const traceId =
     normalizedHeaders["x-upstream-trace-id"] ||
     (typeof safePayload?.traceId === "string" ? safePayload.traceId : "") ||
     generateSecureTraceId();
 
-  // Case-insensitive upstream service extraction
   const upstreamService =
     normalizedHeaders["x-upstream-service"] ||
     (typeof safePayload?.upstreamService === "string" ? safePayload.upstreamService : "") ||
@@ -333,25 +335,26 @@ export function interceptAndTranslateUpstreamError(
   let suggestedDuration: Duration | undefined = undefined;
   let actionLabel: string | undefined = undefined;
 
-  // PREVIOUSLY PATCHED (Preserved):
-  // Truncate raw message to 250 characters before running fallback regexes.
-  // Prevents Catastrophic Regex Backtracking (ReDoS) against unbounded attacker payloads.
-  const safeRegexTarget = rawTechnicalMessage.substring(0, 250);
+  // ARCHITECTURAL RULE 2: Fix Truncation Blindness via Strict Bounded Quantifiers
+  // Rather than truncating rawTechnicalMessage to 250 chars (which drops variables deep in stack traces),
+  // all fallback regexes operate across the full string using bounded quantifiers (\s{1,10}, [0-9]{1,4})
+  // to mathematically guarantee O(N) evaluation and eliminate ReDoS.
 
   switch (errorCode) {
     case "ERR_UNSUPPORTED_ASPECT_RATIO_IN_PROMPT": {
-      // MITIGATION 5: Prototype Pollution in Metadata (getSafeMetadata)
-      // MITIGATION 1: Case-Insensitive Header Extraction (normalizedHeaders)
+      // 1. Safe metadata extraction with type leak prevention (unknown return type)
+      // 2. Case-insensitive header fallback
+      // 3. Resilient bounded regex fallback over full stack trace
       const rawInvalidRatio =
-        getSafeMetadata(safePayload?.metadata, "invalidRatio") ||
+        extractSafeString(getSafeMetadata(safePayload?.metadata, "invalidRatio")) ||
         normalizedHeaders["x-invalid-ratio"] ||
         normalizedHeaders["x-upstream-invalid-ratio"] ||
-        safeRegexTarget.match(/aspect\s+ratio\s+['"]?([0-9]+:[0-9]+)['"]?/i)?.[1] ||
-        safeRegexTarget.match(/\b([0-9]+:[0-9]+)\b/)?.[1] ||
+        rawTechnicalMessage.match(/aspect\s{1,10}ratio\s{1,10}['"]?([0-9]{1,4}:[0-9]{1,4})['"]?/i)?.[1] ||
+        rawTechnicalMessage.match(/\b([0-9]{1,4}:[0-9]{1,4})\b/)?.[1] ||
         "specified";
 
-      // MITIGATION 4: XSS & Payload Injection via String Interpolation
-      const cleanInvalidRatio = escapeHtml(String(rawInvalidRatio).trim());
+      // ARCHITECTURAL RULE 1: Eliminate Double-Escaping (stripDangerousChars)
+      const cleanInvalidRatio = stripDangerousChars(rawInvalidRatio);
       sanitizedMessage = `The aspect ratio '${cleanInvalidRatio}' in your prompt is not supported.`;
       category = "ASPECT_RATIO";
       actionableTip =
@@ -360,39 +363,39 @@ export function interceptAndTranslateUpstreamError(
     }
 
     case "ERR_ASPECT_RATIO_DROPDOWN_CONFLICT": {
-      // MITIGATION 5: Prototype Pollution in Metadata (getSafeMetadata)
-      // MITIGATION 1: Case-Insensitive Header Extraction (normalizedHeaders)
+      // 1. Safe metadata extraction with type leak prevention (unknown return type)
+      // 2. Case-insensitive header fallback
+      // 3. Resilient bounded regex fallback over full stack trace
       const rawPromptRatio =
-        getSafeMetadata(safePayload?.metadata, "conflictingRatio") ||
-        getSafeMetadata(safePayload?.metadata, "promptRatio") ||
+        extractSafeString(getSafeMetadata(safePayload?.metadata, "conflictingRatio")) ||
+        extractSafeString(getSafeMetadata(safePayload?.metadata, "promptRatio")) ||
         normalizedHeaders["x-conflicting-prompt-ratio"] ||
         normalizedHeaders["x-upstream-conflicting-ratio"] ||
-        safeRegexTarget.match(/prompt\s+(?:semantic\s+)?ratio(?:\s+constraint)?\s+['"]?([0-9]+:[0-9]+)['"]?/i)?.[1] ||
-        safeRegexTarget.match(/(?:requested|prompt)\s+['"]?([0-9]+:[0-9]+)['"]?/i)?.[1] ||
-        safeRegexTarget.match(/\b([0-9]+:[0-9]+)\b/)?.[1] ||
+        rawTechnicalMessage.match(/prompt(?:\s{1,5}semantic)?\s{1,5}ratio(?:\s{1,5}constraint)?\s{1,5}['"]?([0-9]{1,4}:[0-9]{1,4})['"]?/i)?.[1] ||
+        rawTechnicalMessage.match(/(?:requested|prompt)\s{1,5}['"]?([0-9]{1,4}:[0-9]{1,4})['"]?/i)?.[1] ||
+        rawTechnicalMessage.match(/\b([0-9]{1,4}:[0-9]{1,4})\b/)?.[1] ||
         "in prompt";
 
       const rawDropdownRatio =
-        getSafeMetadata(safePayload?.metadata, "selectedRatio") ||
-        getSafeMetadata(safePayload?.metadata, "dropdownRatio") ||
+        extractSafeString(getSafeMetadata(safePayload?.metadata, "selectedRatio")) ||
+        extractSafeString(getSafeMetadata(safePayload?.metadata, "dropdownRatio")) ||
         normalizedHeaders["x-selected-dropdown-ratio"] ||
         normalizedHeaders["x-upstream-selected-ratio"] ||
-        safeRegexTarget.match(/(?:parameter|header)\s+['"]?x-zyka-aspect-ratio['"]?\s*\(?([0-9]+:[0-9]+)\)?/i)?.[1] ||
-        safeRegexTarget.match(/(?:selected|dropdown)\s+['"]?([0-9]+:[0-9]+)['"]?/i)?.[1] ||
-        safeRegexTarget.match(/\b([0-9]+:[0-9]+)\b/)?.[1] ||
+        rawTechnicalMessage.match(/(?:parameter|header)\s{1,5}['"]?x-zyka-aspect-ratio['"]?\s{0,5}\(?([0-9]{1,4}:[0-9]{1,4})\)?/i)?.[1] ||
+        rawTechnicalMessage.match(/(?:selected|dropdown)\s{1,5}['"]?([0-9]{1,4}:[0-9]{1,4})['"]?/i)?.[1] ||
+        rawTechnicalMessage.match(/\b([0-9]{1,4}:[0-9]{1,4})\b/)?.[1] ||
         "in dropdown";
 
-      // MITIGATION 4: XSS & Payload Injection via String Interpolation
-      const cleanPromptRatio = escapeHtml(String(rawPromptRatio).trim());
-      const cleanDropdownRatio = escapeHtml(String(rawDropdownRatio).trim());
+      // ARCHITECTURAL RULE 1: Eliminate Double-Escaping (stripDangerousChars)
+      const cleanPromptRatio = stripDangerousChars(rawPromptRatio);
+      const cleanDropdownRatio = stripDangerousChars(rawDropdownRatio);
 
       sanitizedMessage = `Your prompt requested ${cleanPromptRatio}, but ${cleanDropdownRatio} is selected in the aspect ratio dropdown.`;
       category = "ASPECT_RATIO";
       actionableTip = `Update your aspect ratio dropdown to match ${cleanPromptRatio}, or remove '${cleanPromptRatio}' from your prompt to use the dropdown setting.`;
 
-      // MITIGATION 2: Blind Type Casting (Runtime Corruption)
-      // Validate untrusted ratio against strict allowed literals before assigning
-      const validatedRatio = validateAspectRatio(rawPromptRatio);
+      // Runtime literal validation against allowed AspectRatio values
+      const validatedRatio = validateAspectRatio(cleanPromptRatio);
       if (validatedRatio) {
         suggestedRatio = validatedRatio;
         actionLabel = `Set Aspect Ratio to ${cleanPromptRatio}`;
@@ -401,39 +404,39 @@ export function interceptAndTranslateUpstreamError(
     }
 
     case "ERR_DURATION_DROPDOWN_CONFLICT": {
-      // MITIGATION 5: Prototype Pollution in Metadata (getSafeMetadata)
-      // MITIGATION 1: Case-Insensitive Header Extraction (normalizedHeaders)
+      // 1. Safe metadata extraction with type leak prevention (unknown return type)
+      // 2. Case-insensitive header fallback
+      // 3. Resilient bounded regex fallback over full stack trace
       const rawPromptDuration =
-        getSafeMetadata(safePayload?.metadata, "conflictingDuration") ||
-        getSafeMetadata(safePayload?.metadata, "promptDuration") ||
+        extractSafeString(getSafeMetadata(safePayload?.metadata, "conflictingDuration")) ||
+        extractSafeString(getSafeMetadata(safePayload?.metadata, "promptDuration")) ||
         normalizedHeaders["x-conflicting-prompt-duration"] ||
         normalizedHeaders["x-upstream-conflicting-duration"] ||
-        safeRegexTarget.match(/prompt\s+(?:semantic\s+)?duration\s+['"]?([0-9]+s?)['"]?/i)?.[1] ||
-        safeRegexTarget.match(/(?:requested|prompt)\s+['"]?([0-9]+s?)['"]?/i)?.[1] ||
-        safeRegexTarget.match(/\b([0-9]+s)\b/i)?.[1] ||
+        rawTechnicalMessage.match(/prompt(?:\s{1,5}semantic)?\s{1,5}duration\s{1,5}['"]?([0-9]{1,4}s{0,1})['"]?/i)?.[1] ||
+        rawTechnicalMessage.match(/(?:requested|prompt)\s{1,5}['"]?([0-9]{1,4}s{0,1})['"]?/i)?.[1] ||
+        rawTechnicalMessage.match(/\b([0-9]{1,4}s)\b/i)?.[1] ||
         "in prompt";
 
       const rawDropdownDuration =
-        getSafeMetadata(safePayload?.metadata, "selectedDuration") ||
-        getSafeMetadata(safePayload?.metadata, "dropdownDuration") ||
+        extractSafeString(getSafeMetadata(safePayload?.metadata, "selectedDuration")) ||
+        extractSafeString(getSafeMetadata(safePayload?.metadata, "dropdownDuration")) ||
         normalizedHeaders["x-selected-dropdown-duration"] ||
         normalizedHeaders["x-upstream-selected-duration"] ||
-        safeRegexTarget.match(/(?:ingress\s+)?duration\s+header\s+['"]?([0-9]+s?)['"]?/i)?.[1] ||
-        safeRegexTarget.match(/(?:selected|dropdown)\s+['"]?([0-9]+s?)['"]?/i)?.[1] ||
-        safeRegexTarget.match(/\b([0-9]+s)\b/i)?.[1] ||
+        rawTechnicalMessage.match(/(?:ingress\s{1,5})?duration\s{1,5}header\s{1,5}['"]?([0-9]{1,4}s{0,1})['"]?/i)?.[1] ||
+        rawTechnicalMessage.match(/(?:selected|dropdown)\s{1,5}['"]?([0-9]{1,4}s{0,1})['"]?/i)?.[1] ||
+        rawTechnicalMessage.match(/\b([0-9]{1,4}s)\b/i)?.[1] ||
         "in dropdown";
 
-      // MITIGATION 4: XSS & Payload Injection via String Interpolation
-      const cleanPromptDuration = escapeHtml(String(rawPromptDuration).trim());
-      const cleanDropdownDuration = escapeHtml(String(rawDropdownDuration).trim());
+      // ARCHITECTURAL RULE 1: Eliminate Double-Escaping (stripDangerousChars)
+      const cleanPromptDuration = stripDangerousChars(rawPromptDuration);
+      const cleanDropdownDuration = stripDangerousChars(rawDropdownDuration);
 
       sanitizedMessage = `Your prompt requested ${cleanPromptDuration}, but ${cleanDropdownDuration} is selected in the duration dropdown.`;
       category = "DURATION";
       actionableTip = `Set the duration dropdown to ${cleanPromptDuration} to match your prompt, or remove the duration from your text.`;
 
-      // MITIGATION 2: Blind Type Casting (Runtime Corruption)
-      // Validate untrusted duration against strict allowed literals before assigning
-      const validatedDuration = validateDuration(rawPromptDuration);
+      // Runtime literal validation against allowed Duration values
+      const validatedDuration = validateDuration(cleanPromptDuration);
       if (validatedDuration) {
         suggestedDuration = validatedDuration;
         actionLabel = `Set Duration to ${cleanPromptDuration}`;
@@ -534,7 +537,7 @@ export function interceptAndTranslateUpstreamError(
 
     default:
       if (validStatus >= 500) {
-        // MITIGATION 7: Granular 5xx Timeout Masking & Differentiation
+        // Granular 5xx Timeout Masking & Differentiation
         category = "SYSTEM";
         if (validStatus === 504) {
           sanitizedMessage =
@@ -605,19 +608,17 @@ export function interceptAndTranslateUpstreamError(
     cumulativeHeaderBytes += k.length + v.length + 4; // key + ": " + val + "\r\n"
   }
 
-  // 3. Forward allowlisted upstream headers under strict cumulative 4KB budget
-  // MITIGATION 1: Normalized lowercase keys ensure canonical standards and avoid case duplication
+  // ARCHITECTURAL RULES 3 & 4: Close Allowlist Loophole & Iterate Over Normalized Headers
+  // We iterate directly over normalizedHeaders (already lowercase and proto-safe).
+  // The lowerKey.startsWith("x-zyka-") wildcard bypass has been eliminated.
+  // Any header not explicitly present in ALLOWED_UPSTREAM_HEADERS is dropped.
   const cleanUpstreamHeaders: Record<string, string> = {};
-  for (const [k, v] of Object.entries(safeRawHeaders)) {
-    const lowerKey = k.toLowerCase();
-    if (
-      ALLOWED_UPSTREAM_HEADERS.has(lowerKey) ||
-      lowerKey.startsWith("x-zyka-")
-    ) {
-      const sanitizedVal = sanitizeHeaderValue(v);
-      const entryBytes = lowerKey.length + sanitizedVal.length + 4;
+  for (const [headerKey, rawHeaderVal] of Object.entries(normalizedHeaders)) {
+    if (ALLOWED_UPSTREAM_HEADERS.has(headerKey)) {
+      const sanitizedVal = sanitizeHeaderValue(rawHeaderVal);
+      const entryBytes = headerKey.length + sanitizedVal.length + 4;
       if (cumulativeHeaderBytes + entryBytes <= MAX_TOTAL_HEADERS_BYTES) {
-        cleanUpstreamHeaders[lowerKey] = sanitizedVal;
+        cleanUpstreamHeaders[headerKey] = sanitizedVal;
         cumulativeHeaderBytes += entryBytes;
       }
     }
