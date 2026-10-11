@@ -1,7 +1,7 @@
-# Zyka.ai — Multi-Modal Studio & Middleware Error Interceptor
+# Zyka.ai — Multi-Modal Studio & Enterprise Zero-Trust Error Translation Gateway
 
-> **Production-grade assessment prototype for Zyka.ai (AI Video, Image & Voice Generator in One Platform).**  
-> Built with Next.js 16 (App Router), TypeScript, Tailwind CSS v4, Framer Motion, and `pnpm`.
+> **Production-grade assessment prototype for [Zyka.ai](https://zyka.ai/) (AI Video, Image & Voice Generator in One Platform).**  
+> Built with Next.js 16 (App Router, Turbopack), TypeScript 5.9, Tailwind CSS v4, Framer Motion, and `pnpm`.
 
 ---
 
@@ -9,178 +9,212 @@
 
 [Zyka.ai](https://zyka.ai/) is an all-in-one GenAI platform providing **AI Video**, **AI Image**, and **AI Voice** synthesis powered by state-of-the-art models like Sora 2, Veo 3.1, Kling v3 Pro, FLUX 2 Dev, and Zyka Helion.
 
-When non-technical users prompt models on generation platforms, common friction points arise:
-1. **Prompts exceeding 1000 words** trigger cryptic upstream tokenizer overflow errors.
-2. **Users in the wrong service tab** (e.g., typing an image generation prompt while in the Video tab, or a video motion prompt in the Image tab) cause upstream pipeline mismatches.
-3. **Cryptic Upstream Errors**: Upstream models return multi-line C++/CUDA stack traces in response headers (e.g., `[FATAL] UpstreamContextOverflowException: Code 0x8F92...`).
+When non-technical creators interact with complex multi-modal generation pipelines, friction points frequently degrade the user experience:
+1. **Cryptic Upstream Failures**: GPU worker nodes and inference engines return low-level C++/CUDA stack traces in headers (`[FATAL] UpstreamContextOverflowException: Tokenizer buffer allocation exceeded at tensor_core.cpp:812...`).
+2. **Modal Mismatches**: Users in the wrong service tab (e.g., entering an image prompt while on the Video tab, or voice dialogue on the Image tab) cause pipeline rejection.
+3. **Prompt & Parameter Conflicts**: Discrepancies between prompt text and UI dropdowns (such as aspect ratio or clip duration) trigger upstream geometry failures.
+4. **Security & Zero-Trust Vulnerabilities**: Edge rate limiting bypasses, client IP spoofing, raw library error leakage, HTTP header stuffing, and unhandled status codes.
 
-### Objectives Solved:
-1. **Middleware Error Translation**: Intercepts upstream technical response headers and translates them into concise 1-line plain English messages (e.g., *"Word limit for the prompt is exceeded from 1000 words."*).
-2. **User Retention & Service Mismatch Recovery**: In case of a service mismatch (e.g., requesting an image in the video tab), the platform displays a friendly explanation and an engaging tip directing the user to the correct service on Zyka AI with a **1-click switch action**, keeping the user engaged on the platform.
-3. **DevTools-Style Network & Error Inspector**:
+### Key Objectives Solved:
+1. **Enterprise Error Translation Engine**: Intercepts raw technical errors and transforms them into concise, 1-line plain English messages without leaking internal topology or stack traces.
+2. **User Retention & 1-Click Recovery**: Provides contextual retention tips with **1-click action buttons** (e.g., *"Switch to Image Generator"* or *"Sync Ratio to 9:16"*), preventing drop-off.
+3. **DevTools Network & Error Inspector**:
    - Collapsible DevTools accordion tree:
      - `▶ Response headers (N)`
      - `▶ Request headers (N)`
      - `▶ Response payload (Complete JSON)`
-   - Partially collapsed by default with *'Show full JSON'* / *'Show less'* toggles.
-   - **Two Distinct Error Comparison Labels**:
-     - ❌ **Without the error handling then the error message**: The raw 3–5 line technical error code / stacktrace.
-     - ✅ **With proper error handling, the error message**: The clean, non-engineer-friendly message + retention tip.
-4. **Server-Level Real-IP Error Logging & User-Wise Audit**:
-   - RFC 7239 Real-IP extraction: Evaluates `cf-connecting-ip` (Cloudflare) -> `true-client-ip` (Akamai/Cloudflare Ent) -> `x-real-ip` (Nginx) -> `x-forwarded-for` (first client hop) -> fallback loopback.
-   - User-wise tracking via authenticated `x-zyka-user-id` or deterministic client fingerprint (`usr_anon_...`).
-   - Dual persistent file audit:
-     * `logs/server-errors.log` (Formatted server log lines)
-     * `logs/server-errors.jsonl` (Structured JSON Lines for SIEM / Datadog / ELK)
-   - Real-time audit query endpoint: `GET /api/logs?ip=...&userId=...&code=...`
-5. **Zyka.ai Studio UI**:
-   - Matches the official Zyka.ai prompt studio mockup:
-     - Mode Pills: `Image`, `Video`, `Voice` with pink/magenta active styling.
-     - Selector pills: `Auto (Best model)`, `16:9`, `High Quality / Duration`.
-     - Action button: `✨ Generate →` with pink gradient.
+   - Side-by-side comparison panels:
+     - ❌ **Without Error Handling**: The raw multi-line technical error code and stack trace.
+     - ✅ **With Proper Error Handling**: The clean, creator-friendly message and actionable guidance.
+4. **Server-Level Real-IP Logging & Audit Trail**:
+   - Evaluates trusted proxies in reverse (`cf-connecting-ip` -> `true-client-ip` -> `x-real-ip` -> `x-forwarded-for`).
+   - IPv6 `/64` CIDR normalization to eliminate rate limit evasion across 2⁶⁴ sub-addresses.
+   - Dual-persistence audit logging:
+     - `logs/server-errors.log` (Formatted human-readable log records)
+     - `logs/server-errors.jsonl` (Structured JSON Lines for SIEM / Datadog / ELK)
+   - Authenticated audit endpoint: `GET /api/logs` with Bearer token authentication.
+5. **Modern Zyka.ai Studio UI**:
+   - Mode Pills: `Image`, `Video`, `Voice` with interactive styling.
+   - Selector Pills: Model selection, aspect ratio, duration, and quality.
+   - Real-time client rate-limit countdown and request abort support.
 
 ---
 
-## 📐 2. Low-Level Design (LLD) & System Flow
+## 🛡️ 2. Zero-Trust Security & Audit Hardening (E1–E10, N1–N10)
 
-### 2.1 End-to-End Sequence Diagram
+The codebase has undergone rigorous zero-trust adversarial security audits and hardening:
+
+| Finding ID | Security & Architectural Hardening | Remediated Implementation |
+|---|---|---|
+| **E1** | **Response Status Crash & 2xx Masquerading** | Replaced permissive clamping with `normalizeErrorStatus()`. Enforces status in `[400, 599]`; clamps non-4xx/5xx or invalid error statuses to `502 Bad Gateway`, preventing `Response` constructor crashes on 1xx/204/304 and 200 error masquerading. |
+| **E2** | **Chunked Body Overflow & Stream Stalls** | Set `proxyClientMaxBodySize: "64kb"` in `next.config.ts` so the route handler intercepts overflows with `413 Payload Too Large`. Added 5,000ms body-read timeout (`RequestTimeoutError` -> `408 Request Timeout`). |
+| **E3** | **HTML Error Confusion & Client Resilience** | Decoupled `fetch` parsing to handle non-JSON responses (HTML 502/504 gateway pages) gracefully without triggering false "Network connection lost" errors. Added 60s `AbortController` and `Retry-After` cooldown timer. Implemented JSON 404 catch-all at `/api/[...path]`. |
+| **E4** | **Raw Schema Parser & Empty Field Leaks** | Replaced raw Zod issue stringification with curated `toUserMessage()` mapper, translating issue codes without exposing internal TypeScript unions, parser syntax, or empty field names (`Invalid : ...`). |
+| **E5** | **Cross-Layer Limit Consistency** | Centralized limits in `src/lib/request-schema.ts`: `MAX_BODY_BYTES = 32_768`, `MAX_PROMPT_CHARS = 8_000`, `MAX_WORDS = 1_000`. Aligned UI tips and backend constraints. |
+| **E6** | **Comprehensive Error Logging & Disk Merging** | Integrated `recordServerError()` calls for 400, 403, 405, 408, 413, 415, and 500 status codes across `proxy.ts` and route handlers. Updated `/api/logs` to read JSONL logs from disk to bridge process separation. |
+| **E7** | **Content-Type Gate & Schema Strictness** | Enforced strict `Content-Type: application/json` returning HTTP 415. Applied `.strict()` to Zod schema to reject undeclared or smuggled parameters. |
+| **E8** | **Exhaustive Fallback Status Codes** | Implemented `handleFallbackStatusCodes()` mapping 401, 405, 408, 413, 415, 422, 429, 451, 502, 503, and 504 to tailored creator messages and actionable retention tips. |
+| **E9** | **Topology Disclosure Prevention** | Sanitized untrusted proxy origin errors to generic HTTP 403 Forbidden messages, completely masking internal network topology. |
+| **E10** | **Modality Alignment & CSP Hardening** | Unified all selectors and schemas to `voice`; eliminated `any` types; suppressed noisy `ECONNRESET` drops (`499`); dropped `'unsafe-eval'` from CSP in production. |
+| **N1–N10** | **Adversarial Network Protection** | Fail-closed client IP resolution; IPv6 `/64` keying; LRU bounded sliding window rate limiter; strict header allowlist; bounded regexes preventing ReDoS (< 2ms on 50k chars); zero raw upstream header leaks to clients. |
+
+---
+
+## 📐 3. End-to-End Architecture & Sequence Flow
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor User as User / Creator
+    actor User as Creator / Client
     participant Client as Zyka Studio UI (Next.js 16)
-    participant Proxy as Edge Proxy Middleware (src/proxy.ts)
-    participant Route as API Route Handler (/api/generate)
-    participant Interceptor as Middleware Error Interceptor
-    participant Upstream as Mock Upstream Engine (GPU Node)
+    participant Proxy as Edge Proxy (src/proxy.ts)
+    participant Route as API Handler (/api/generate)
+    participant Interceptor as Error Interceptor
+    participant Logger as Server Logger (JSONL)
+    participant Upstream as Mock Upstream AI Engine
 
-    User->>Client: Enters Prompt & Selects (Image / Video / Voice)
-    Client->>Client: Formats Ingress Headers (x-zyka-media-type, etc.)
-    Client->>Proxy: POST /api/generate with Request Headers & JSON Body
+    User->>Client: Enter prompt & select modalities (Image/Video/Voice)
+    Client->>Proxy: POST /api/generate (Content-Type: application/json)
 
-    critical Edge Boundary Check
+    critical Edge Security & Rate Limiting
+        Proxy->>Proxy: Resolve Client IP (IPv6 /64 aggregation)
         Proxy->>Proxy: Sliding-Window Rate Limit Check (5 req / 60s)
         alt Rate Limit Exceeded
-            Proxy-->>Client: HTTP 429 + Header [x-zyka-sanitized-error: "Too many requests..."]
+            Proxy->>Logger: recordServerError(429, RATE_LIMIT)
+            Proxy-->>Client: HTTP 429 + Retry-After + Sanitized Headers
         end
-        Proxy->>Proxy: Ingress Header Validation (media-type check)
     end
 
-    Proxy->>Route: Forward Request with Injected Gateway Telemetry
-    Route->>Upstream: Execute Synthesis (Prompt, Duration, Model, Ratio)
+    Proxy->>Route: Forward with injected telemetry headers
+    Route->>Route: Verify Content-Type & readBoundedJson (Cap: 32 KB, Timeout: 5s)
+    Route->>Route: Zod Schema Validation (.strict(), <= 1000 words)
 
-    alt Service Mismatch Detected (e.g., Image prompt in Video tab)
-        Upstream-->>Route: Return Fault (x-upstream-error-code: ERR_SERVICE_MISMATCH_IMAGE_IN_VIDEO)
-        Route->>Interceptor: Intercept Upstream Headers & Status
-        Interceptor->>Interceptor: Map Error & Generate Engaging Zyka Retention Tip
-        Interceptor-->>Route: Return Sanitized Headers + 1-Click Action Suggestion
-        Route-->>Client: HTTP 422 + Headers + JSON Payload
-    else Word Limit Exceeded (>1000 words)
-        Upstream-->>Route: Return Fault (x-upstream-error-code: ERR_MAX_TOKEN_LIMIT_EXCEEDED)
-        Route->>Interceptor: Intercept & Sanitize to "Word limit exceeded from 1000 words"
-        Route-->>Client: HTTP 400 + Headers + JSON Payload
-    else Valid Generation
-        Upstream-->>Route: 200 OK + Mock Media Stream (MP4 / PNG / MP3)
-        Route-->>Client: 200 OK + Header [x-zyka-status: "SUCCESS"]
+    alt Validation Failed
+        Route->>Logger: recordServerError(400, ERR_SCHEMA_VALIDATION)
+        Route-->>Client: HTTP 400 + Curated Message
     end
 
-    Client->>Client: Parse Headers & Complete JSON Response
-    Client->>User: Render Media Player (Left) & Update DevTools Inspector (Right)
+    Route->>Upstream: Execute Synthesis Request
+    Upstream-->>Route: Return Response or Upstream Fault
+
+    alt Upstream Error Encountered
+        Route->>Interceptor: interceptAndTranslateUpstreamError(status, headers, error)
+        Interceptor->>Interceptor: normalizeErrorStatus() -> Strategy Pattern Dispatch
+        Interceptor-->>Route: Sanitized Error + Actionable Tip + Safe Headers
+        Route->>Logger: recordServerError(translated.statusCode, code)
+        Route-->>Client: HTTP 4xx/5xx + Sanitized JSON (Zero raw leaks)
+    else Generation Successful
+        Route-->>Client: HTTP 200 OK + Generated Media Artifacts
+    end
+
+    Client->>User: Render Media Output or Actionable Error Recovery UI
 ```
 
 ---
 
-## 🧪 3. Edge Cases & Translation Matrix
+## 🧪 4. Error Translation & Retention Matrix
 
-| # | Edge Case | Trigger / Condition | Raw Upstream Technical Error (Header: `x-raw-upstream-error`) | Sanitized User Message (Header: `x-zyka-sanitized-error`) | Platform Retention Tip & Action |
-|---|---|---|---|---|---|
-| **1** | **Word Limit Overflow** | Prompt word count > 1000 words | `[FATAL] UpstreamContextOverflowException: Tokenizer buffer allocation exceeded at tensor_core.cpp:812. Code: 0x8F92 - Max context limit is 1000 words.` | **"Word limit for the prompt is exceeded from 1000 words."** | 💡 Shorten your prompt below 1,000 words for the highest fidelity synthesis on Zyka AI. |
-| **2** | **Image in Video Tab** | User is in Video tab but asks for still image | `[ERROR] VideoRenderPipeline::InvalidModalityException: Static image prompt dispatched to temporal video synthesis pipeline. Code: 0x3F8.` | **"This prompt is for generating a still image, but you are currently in the Video tab."** | 💡 Switch to Zyka AI Image Generator right here to create visuals with FLUX 2 & Zyka Helion! *(1-Click Switch Button)* |
-| **3** | **Video in Image Tab** | User is in Image tab but asks for video motion | `[ERROR] RasterDiffusionException::TemporalMotionConstraintException: Dynamic sequence tokens detected in static 2D latent space. Code: 0x3F9.` | **"This prompt describes a moving video, but you are currently in the Image tab."** | 💡 Bring your scene to life with Zyka AI Video Generator powered by Sora 2, Veo 3.1 & Kling! *(1-Click Switch Button)* |
-| **4** | **Duration Limit Breach** | Prompt mentions > 30s (e.g. 60s, 2 min) | `[ERROR] VideoPipelineException: TemporalSequenceBoundsExceeded at temporal_encoder.cu:314. Code: 0x4D2 - Requested length exceeds max budget (30s).` | **"Requested duration exceeds the maximum allowed limit of 30 seconds."** | 💡 Select up to 30 seconds per clip on Zyka AI, then seamlessly extend or stitch scenes in our studio. |
-| **5** | **Duration Dropdown Conflict** | Prompt specifies 15s but dropdown is 5s | `[ERROR] DropdownParameterConflictException: Ingress duration '5s' does not match prompt specification '15s'. Code: 0x4D3.` | **"Your prompt specifies 15s duration, but 5s is selected in the duration dropdown."** | 💡 Click to sync the duration selector to 15s to match your prompt. *(1-Click Sync Button)* |
-| **6** | **Unsupported Aspect Ratio** | Prompt specifies `17:8`, `32:9`, `2:1`, etc. | `[ERROR] GeometryMatrixException: SpatialTensorDimensionMismatch. Code: 0x2B9 - Aspect ratio '17:8' not in registered matrix.` | **"The aspect ratio '17:8' in your prompt is not supported. Supported: 16:9, 9:16, 1:1, 4:3, 21:9."** | 💡 Choose 16:9, 9:16, 1:1, 4:3, or 21:9 in the dropdown to generate with Zyka AI. |
-| **7** | **Aspect Ratio Dropdown Conflict** | Prompt specifies `9:16` but dropdown is `16:9` | `[ERROR] DropdownParameterConflictException: Ingress aspect ratio '16:9' does not match prompt specification '9:16'. Code: 0x2BA.` | **"Your prompt requested 9:16, but 16:9 is selected in the aspect ratio dropdown."** | 💡 Click to change the aspect ratio selector to 9:16 to match your prompt. *(1-Click Sync Button)* |
-| **8** | **Unsupported Format** | Prompt requests GIF, Vector SVG, 3D model | `[ERROR] CodecNegotiationFailedException in MediaTransmuxer. Code: 0x7E1 - Target artifact is unsupported by synthesis driver.` | **"Unsupported media format requested. Only Image, Video, and Voice generations are supported."** | 💡 Zyka AI generates ultra-high-definition MP4 videos, PNG images, and studio-grade Voice audio. |
-| **9** | **Resolution Limit Exceeded** | Prompt requests 8K or 16K resolution | `[ERROR] FrameBufferSizeExceededException: Requested 8K resolution exceeds standard raster buffer. Code: 0x5C2.` | **"Requested 8K resolution exceeds the current platform maximum of 4K UHD."** | 💡 Zyka AI generates crisp 4K UHD outputs, optimized for rapid rendering and fluid playback. |
-| **10** | **Sliding Window Rate Limit** | > 5 requests within 60s window | `[FATAL] HTTP 429 Too Many Requests: IP client sliding-window limit breached. Code: 0x1AD - Max 5 requests per 60 seconds exceeded.` | **"Too many requests. Please wait a moment before trying again."** | 💡 Our sliding-window system ensures fast GPU allocation for all creators. Please wait a few seconds. |
-| **11** | **Empty Payload** | Prompt is blank or whitespace | `[ERROR] InvalidPayloadException: Token buffer contains null sequence at offset 0. Code: 0x00A.` | **"Prompt cannot be empty. Please enter your creative prompt."** | 💡 Describe any scene, character, motion, or speech to generate media with Zyka AI. |
+| # | Condition | Raw Upstream Technical Error | Sanitized User Message | Retention Tip & Action |
+|---|---|---|---|---|
+| **1** | **Word Limit Overflow** | `[FATAL] UpstreamContextOverflowException: Tokenizer buffer exceeded. Code: 0x8F92 - Max limit is 1000 words.` | **"Word limit for the prompt is exceeded from 1000 words."** | 💡 Shorten your prompt below 1,000 words for the highest fidelity synthesis on Zyka AI. |
+| **2** | **Image in Video Tab** | `[ERROR] VideoRenderPipeline::InvalidModalityException: Static image prompt dispatched to temporal video pipeline. Code: 0x3F8.` | **"This prompt is for generating a still image, but you are currently in the Video tab."** | 💡 Switch to Zyka AI Image Generator right here to create visuals with FLUX 2 & Zyka Helion! *(1-Click Switch Button)* |
+| **3** | **Video in Image Tab** | `[ERROR] RasterDiffusionException::TemporalMotionConstraintException: Dynamic sequence tokens detected. Code: 0x3F9.` | **"This prompt describes a moving video, but you are currently in the Image tab."** | 💡 Bring your scene to life with Zyka AI Video Generator powered by Sora 2, Veo 3.1 & Kling! *(1-Click Switch Button)* |
+| **4** | **Duration Limit Breach** | `[ERROR] VideoPipelineException: TemporalSequenceBoundsExceeded. Code: 0x4D2 - Requested length exceeds 30s.` | **"Requested duration exceeds the maximum allowed limit of 30 seconds."** | 💡 Select up to 30 seconds per clip on Zyka AI, then seamlessly extend or stitch scenes in our studio. |
+| **5** | **Duration Conflict** | `[ERROR] DropdownParameterConflictException: Ingress duration '5s' does not match prompt '15s'. Code: 0x4D3.` | **"Your prompt requested 15s, but 5s is selected in the duration dropdown."** | 💡 Click to sync the duration selector to 15s to match your prompt. *(1-Click Sync Button)* |
+| **6** | **Unsupported Ratio** | `[ERROR] GeometryMatrixException: SpatialTensorDimensionMismatch. Code: 0x2B9 - Ratio '17:8' not registered.` | **"The aspect ratio '17:8' in your prompt is not supported."** | 💡 Choose 16:9, 9:16, 1:1, 4:3, or 21:9 in the dropdown to generate with Zyka AI. |
+| **7** | **Ratio Conflict** | `[ERROR] DropdownParameterConflictException: Ingress ratio '16:9' does not match prompt '9:16'. Code: 0x2BA.` | **"Your prompt requested 9:16, but 16:9 is selected in the aspect ratio dropdown."** | 💡 Click to change the aspect ratio selector to 9:16 to match your prompt. *(1-Click Sync Button)* |
+| **8** | **Unsupported Format** | `[ERROR] CodecNegotiationFailedException in MediaTransmuxer. Code: 0x7E1 - Target artifact unsupported.` | **"Unsupported media format requested. Only Image, Video, and Voice generations are supported."** | 💡 Zyka AI generates ultra-high-definition MP4 videos, PNG images, and studio-grade Voice audio. |
+| **9** | **Resolution Exceeded** | `[ERROR] FrameBufferSizeExceededException: Requested 8K resolution exceeds standard buffer. Code: 0x5C2.` | **"Requested resolution (8K/16K) exceeds standard model generation limits."** | 💡 Zyka AI generates crisp 4K UHD outputs, optimized for rapid rendering and fluid playback. |
+| **10** | **Rate Limit Exceeded** | `[FATAL] HTTP 429 Too Many Requests: Sliding-window limit breached. Code: 0x1AD.` | **"Too many requests. Please wait a moment before trying again."** | 💡 Our sliding-window system ensures fast GPU allocation for all creators. Please wait a few seconds. |
+| **11** | **Empty Prompt** | `[ERROR] InvalidPayloadException: Token buffer contains null sequence at offset 0. Code: 0x00A.` | **"Prompt cannot be empty. Please enter your creative prompt."** | 💡 Describe any scene, character, motion, or speech to generate media with Zyka AI. |
 
 ---
 
-## 🛠️ 4. Tech Stack & Directory Structure
-
-- **Framework**: Next.js 16.4.0 (App Router, Turbopack)
-- **Language**: TypeScript 5.9
-- **Package Manager**: `pnpm` (v11.10.0)
-- **Styling**: Tailwind CSS v4 (Pleasant light theme: `#f8fafc` background with white cards)
-- **Animations**: Framer Motion 14
-- **Icons**: Lucide React
+## 🛠️ 5. Project Structure
 
 ```
 Assessment_Zyka-ai/
 ├── src/
 │   ├── app/
-│   │   ├── api/generate/
-│   │   │   └── route.ts             # API Route Handler with Telemetry
-│   │   ├── globals.css              # Tailwind v4 light theme styles
-│   │   ├── layout.tsx               # Root Layout
-│   │   └── page.tsx                 # Zyka Studio & DevTools Inspector
+│   │   ├── api/
+│   │   │   ├── [...path]/route.ts       # JSON 404 catch-all for undefined API routes
+│   │   │   ├── generate/route.ts        # Primary generation API with strict schema validation
+│   │   │   └── logs/route.ts            # Authenticated audit logs query endpoint
+│   │   ├── globals.css                  # Tailwind v4 light theme styles
+│   │   ├── layout.tsx                   # Root HTML layout with hardened CSP
+│   │   └── page.tsx                     # Studio interface & DevTools Inspector
 │   ├── components/
-│   │   ├── GenerationResult.tsx      # Video, Voice & Image media players
-│   │   ├── InternalsInspector.tsx    # DevTools collapsible JSON & Dual Error Labels
-│   │   ├── MediaSelectors.tsx        # Dropdown selectors
-│   │   ├── PromptForm.tsx            # Reference-styled Image/Video/Voice prompt box
-│   │   └── ui/
-│   │       └── LoadingSteps.tsx      # Authentic GenAI synthesis loader
+│   │   ├── GenerationResult.tsx         # Media players for Video, Voice, and Image
+│   │   ├── InternalsInspector.tsx       # DevTools collapsible JSON & side-by-side error labels
+│   │   ├── MediaSelectors.tsx           # Modality and parameter dropdowns
+│   │   └── PromptForm.tsx               # Reference-styled Image/Video/Voice prompt box
 │   ├── lib/
 │   │   ├── middleware/
-│   │   │   └── error-interceptor.ts    # Header error translation & retention engine
-│   │   ├── mock-upstream.ts          # Simulates upstream AI GPU nodes & raw headers
-│   │   ├── rate-limit.ts             # Sliding window algorithm
-│   │   ├── server-logger.ts          # Enterprise Real-IP & user-wise error auditor
-│   │   └── utils.ts                  # Class merging utilities
-│   ├── proxy.ts                     # Next.js 16 Edge Proxy (Sliding Window & Guard)
+│   │   │   ├── error-handlers.ts        # Strategy pattern error handlers & fallback matrices
+│   │   │   ├── error-interceptor.ts     # Core middleware error translation orchestrator
+│   │   │   └── error-utils.ts           # Status normalizers, ReDoS-safe regexes & header sanitizers
+│   │   ├── mock-upstream.ts             # Simulates upstream AI GPU nodes & raw headers
+│   │   ├── operations-store.ts          # Server-side operations tracking
+│   │   ├── rate-limit.ts                # Sliding-window algorithm with IPv6 /64 aggregation
+│   │   ├── request-schema.ts            # Zod validation schema, bounded body reader & toUserMessage
+│   │   ├── server-logger.ts             # Enterprise Real-IP audit logger (JSONL + memory merge)
+│   │   └── utils.ts                     # Utility helpers
+│   ├── proxy.ts                         # Edge Proxy (Method guards, rate limiting, IP resolution)
 │   └── types/
-│       └── index.ts                 # Shared TypeScript interfaces
+│       └── index.ts                     # Shared TypeScript interfaces
 ├── scripts/
-│   ├── test-suite.mjs               # Automated QA functional suite (12 tests)
-│   ├── stress-test.mjs              # Adversarial stress test suite (74 tests)
-│   └── test-server-logs.mjs         # Real-IP & user audit test suite (30 assertions)
-├── logs/                            # Runtime server logs (generated on execution, gitignored)
+│   ├── test-suite.mjs                   # Automated QA functional suite (12 tests)
+│   ├── test-vulnerabilities.mjs         # Zero-trust security & vulnerability suite (50 assertions)
+│   ├── test-server-logs.mjs             # Real-IP & user-wise audit suite (15 assertions)
+│   └── stress-test.mjs                  # Adversarial stress test suite (74 tests)
+├── logs/                                # Local runtime server logs (server-errors.jsonl)
+├── next.config.ts                       # Next.js configuration with proxyClientMaxBodySize & CSP
 ├── package.json
 └── README.md
 ```
 
 ---
 
-## 🚀 5. Local Setup & Testing Instructions
+## 🚀 6. Setup & Verification Instructions
 
+### 1. Installation
 ```bash
-# 1. Clone repository
-git clone <repo-url>
+# Clone the repository
+git clone https://github.com/PrateekSingh2/Assessment_Zyka-ai.git
 cd Assessment_Zyka-ai
 
-# 2. Install dependencies with pnpm
+# Install dependencies
 pnpm install
+```
 
-# 3. Build optimized Next.js 16 production bundle
-pnpm build
+### 2. Type Checking
+```bash
+# Verify TypeScript strict type-checking (0 compiler errors)
+npx tsc --noEmit
+```
 
-# 4. Start production server
-pnpm start
+### 3. Run Automated Test Suites
+```bash
+# 1. Zero-Trust Security & Vulnerability Test Suite (50 assertions)
+node scripts/test-vulnerabilities.mjs
 
-# 5. Run automated QA functional test suite (in another terminal)
-pnpm test
+# 2. Server Error Logging & Real-IP Persistence Suite (15 assertions)
+node scripts/test-server-logs.mjs
 
-# 6. Run adversarial stress test suite (74 rigorous tests)
-pnpm run test:stress
+# 3. Live Functional QA Verification Suite (12 test scenarios)
+node scripts/test-suite.mjs
 
-# 7. Run real-IP & user-wise server logging audit suite (30 assertions)
-pnpm run test:logs
+# 4. Adversarial Stress & Concurrency Test Suite (74 tests)
+node scripts/stress-test.mjs
+```
 
-# 8. Start interactive development server
+### 4. Running the Application
+```bash
+# Start development server
 pnpm dev
-# Open http://localhost:3000
+# Server listening at http://localhost:3000
+
+# Build and run for production
+pnpm build
+pnpm start
 ```
