@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { checkSlidingWindowRateLimit } from "@/lib/rate-limit";
-import { interceptAndTranslateUpstreamError } from "@/lib/middleware/error-interceptor";
+import { interceptAndTranslateUpstreamError, generateSecureTraceId } from "@/lib/middleware/error-interceptor";
 import { extractRealClientIp, resolveUserIdentifier, recordServerError } from "@/lib/server-logger";
 
 export function proxy(request: NextRequest) {
@@ -15,7 +15,7 @@ export function proxy(request: NextRequest) {
     const rateLimit = checkSlidingWindowRateLimit(realClientIp, 5, 60000);
 
     if (!rateLimit.success) {
-      const traceId = `trace-ratelimit-${Date.now()}`;
+      const traceId = generateSecureTraceId();
       const technicalMsg = `[FATAL] HTTP 429 Too Many Requests: IP client sliding-window limit breached. | Code: 0x1AD - Max 5 requests per 60 seconds exceeded. Throttle engaged at edge proxy gateway for IP: ${realClientIp} (${ipSource}). | Remaining: 0 tokens. Reset in ${rateLimit.resetSeconds}s. | TraceID: ${traceId}`;
       
       const upstreamHeaders = {
@@ -76,7 +76,7 @@ export function proxy(request: NextRequest) {
 
     // 2. Block non-POST methods on /api/generate
     if (request.method !== "POST") {
-      const traceId = `trace-method-${Date.now()}`;
+      const traceId = generateSecureTraceId();
       const technicalMsg = `[ERROR] HttpMethodDisallowed: Received ${request.method} request on endpoint /api/generate. Allowed: [POST]. | TraceID: ${traceId}`;
       
       const serverLog = recordServerError({
@@ -116,7 +116,7 @@ export function proxy(request: NextRequest) {
     // 3. Validate Ingress x-zyka-media-type Header
     const mediaTypeHeader = request.headers.get("x-zyka-media-type");
     if (mediaTypeHeader && !["image", "video", "audio", "voice"].includes(mediaTypeHeader)) {
-      const traceId = `trace-badheader-${Date.now()}`;
+      const traceId = generateSecureTraceId();
       const technicalMsg = `[ERROR] HeaderValidationException: 'x-zyka-media-type' header value '${mediaTypeHeader}' is not registered in valid media codec catalog. | Code: 0x7E1 - Supported values are: [image, video, voice]. | TraceID: ${traceId}`;
       
       const upstreamHeaders = {

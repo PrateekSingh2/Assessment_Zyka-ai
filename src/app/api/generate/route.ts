@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { executeMockUpstreamAI } from "@/lib/mock-upstream";
-import { interceptAndTranslateUpstreamError } from "@/lib/middleware/error-interceptor";
+import { interceptAndTranslateUpstreamError, generateSecureTraceId } from "@/lib/middleware/error-interceptor";
 import { MediaType, AspectRatio, Duration } from "@/types";
 import {
   recordServerError,
@@ -34,7 +34,7 @@ export async function POST(req: NextRequest) {
     const validMediaTypes = ["image", "video", "audio", "voice"];
 
     if (!validMediaTypes.includes(mediaTypeStr)) {
-      const traceId = `trace-invalidmedia-${Date.now()}`;
+      const traceId = generateSecureTraceId();
       const technicalMsg = `[ERROR] HeaderValidationException: 'mediaType' body field value '${mediaTypeStr}' is not in valid media type registry. Code: 0x7E1 - Supported values are: [image, video, voice, audio]. TraceID: ${traceId}`;
       const fallbackHeaders = {
         "x-upstream-error-code": "ERR_UNSUPPORTED_MEDIA_TYPE",
@@ -193,7 +193,7 @@ export async function POST(req: NextRequest) {
     // Top-level crash handler
     console.error("Unhandled Exception in Route Handler:", unexpectedError);
 
-    const traceId = `trace-panic-${Date.now()}`;
+    const traceId = generateSecureTraceId();
     const fallbackHeaders = {
       "x-upstream-error-code": "ERR_INTERNAL_GATEWAY_FAULT",
       "x-upstream-raw-error": `[CRITICAL] UnhandledServerException at route.ts:89\nError: ${unexpectedError?.message || "Unknown fault"}\nStack: ${unexpectedError?.stack?.split("\n").slice(0, 3).join("\n") || "No stack"}\nTraceID: ${traceId}`,

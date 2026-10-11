@@ -18,6 +18,7 @@ export interface MockUpstreamResult {
     technicalMessage: string;
     upstreamService: string;
     traceId: string;
+    metadata?: Record<string, any>;
   };
 }
 
@@ -34,7 +35,7 @@ export async function executeMockUpstreamAI(params: {
   await new Promise((resolve) => setTimeout(resolve, 700));
 
   const { prompt, mediaType, duration, aspectRatio, model, quality } = params;
-  const traceId = `trace-${Math.random().toString(36).substring(2, 10)}-${Date.now()}`;
+  const traceId = `trace-${globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : Math.random().toString(36).substring(2, 10)}`;
   const trimmed = prompt.trim();
   const normalizedType = mediaType === "voice" || mediaType === "audio" ? "voice" : mediaType;
 
@@ -217,6 +218,10 @@ export async function executeMockUpstreamAI(params: {
             technicalMessage: `[ERROR] VideoPipelineException: TemporalBudgetMismatch: Ingress duration header '${duration}' does not match prompt semantic duration '${promptDuration}'. Frame sequence cannot resolve.\nTraceID: ${traceId}`,
             upstreamService: "Zyka-Temporal-Diffusion-Renderer",
             traceId,
+            metadata: {
+              conflictingDuration: promptDuration,
+              selectedDuration: duration,
+            },
           },
         };
       }
@@ -246,6 +251,9 @@ export async function executeMockUpstreamAI(params: {
           technicalMessage: `[ERROR] GeometryMatrixException: SpatialTensorDimensionMismatch at spatial_rescaler.cpp:189.\nCode: 0x2B9 - Requested aspect ratio '${extractedRatio}' does not conform to supported tensor enum matrix [1:1, 16:9, 9:16, 4:3, 21:9]. Stride calculation failed at dimension offset 0.\nTraceID: ${traceId}`,
           upstreamService: "Zyka-Spatial-Geometry-Rescaler",
           traceId,
+          metadata: {
+            invalidRatio: extractedRatio,
+          },
         },
       };
     }
@@ -267,6 +275,10 @@ export async function executeMockUpstreamAI(params: {
           technicalMessage: `[ERROR] ParameterConflictException: Mismatch between ingress parameter 'x-zyka-aspect-ratio' (${aspectRatio}) and prompt semantic ratio constraint '${extractedRatio}'. Pipeline halted to prevent composition distortion.\nTraceID: ${traceId}`,
           upstreamService: "Zyka-Parameter-Validator",
           traceId,
+          metadata: {
+            conflictingRatio: extractedRatio,
+            selectedRatio: aspectRatio,
+          },
         },
       };
     }

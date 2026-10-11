@@ -1,4 +1,4 @@
-import { SanitizedErrorDetail, UpstreamErrorDetail, AspectRatio, Duration } from "@/types";
+import type { SanitizedErrorDetail, UpstreamErrorDetail, AspectRatio, Duration } from "@/types";
 
 export interface ErrorTranslationResult {
   statusCode: number;
@@ -7,9 +7,77 @@ export interface ErrorTranslationResult {
   responseHeaders: Record<string, string>;
 }
 
-export function sanitizeHeaderValue(val: string): string {
-  if (typeof val !== "string") return String(val);
-  return val.replace(/[\r\n]+/g, " | ").trim();
+export interface UpstreamErrorPayload {
+  code?: string;
+  technicalMessage?: string;
+  upstreamService?: string;
+  traceId?: string;
+  metadata?: {
+    conflictingRatio?: string;
+    selectedRatio?: string;
+    promptRatio?: string;
+    dropdownRatio?: string;
+    conflictingDuration?: string;
+    selectedDuration?: string;
+    promptDuration?: string;
+    dropdownDuration?: string;
+    invalidRatio?: string;
+    requestedDuration?: string;
+    maxDuration?: string;
+    maxWordLimit?: number;
+    detectedWordCount?: number;
+    unsupportedFormat?: string;
+    [key: string]: any;
+  };
+}
+
+const MAX_HEADER_VALUE_LENGTH = 1000;
+
+/**
+ * Sanitizes header values for safe HTTP transport:
+ * 1. Safe JSON serialization for objects/arrays (prevents "[object Object]" pollution)
+ * 2. Replaces CR/LF newlines with " | " to prevent HTTP response splitting
+ * 3. Enforces strict upper-bound character length (1,000 chars) to prevent HTTP 431 Request Header Fields Too Large crashes
+ */
+export function sanitizeHeaderValue(
+  val: unknown,
+  maxLength: number = MAX_HEADER_VALUE_LENGTH
+): string {
+  if (val === null || val === undefined) return "";
+
+  let stringified: string;
+  if (typeof val === "object") {
+    try {
+      stringified = JSON.stringify(val);
+    } catch {
+      stringified = String(val);
+    }
+  } else {
+    stringified = String(val);
+  }
+
+  return stringified
+    .replace(/[\r\n]+/g, " | ")
+    .trim()
+    .substring(0, maxLength);
+}
+
+/**
+ * Generates an RFC 4122 compliant collision-resistant trace ID using crypto.randomUUID()
+ * Safe for high-concurrency environments under 100+ concurrent requests.
+ */
+export function generateSecureTraceId(): string {
+  try {
+    if (typeof globalThis !== "undefined" && globalThis.crypto?.randomUUID) {
+      return `trace-${globalThis.crypto.randomUUID()}`;
+    }
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const crypto = require("crypto");
+    if (crypto.randomUUID) {
+      return `trace-${crypto.randomUUID()}`;
+    }
+  } catch {}
+  return `trace-${Date.now()}-${Math.random().toString(36).substring(2, 10)}-${Math.random().toString(36).substring(2, 10)}`;
 }
 
 /**
@@ -21,12 +89,7 @@ export function sanitizeHeaderValue(val: string): string {
 export function interceptAndTranslateUpstreamError(
   upstreamStatus: number,
   upstreamHeaders: Record<string, string>,
-  errorPayload?: {
-    code?: string;
-    technicalMessage?: string;
-    upstreamService?: string;
-    traceId?: string;
-  }
+  errorPayload?: UpstreamErrorPayload
 ): ErrorTranslationResult {
   const errorCode =
     upstreamHeaders["x-upstream-error-code"] ||
@@ -38,10 +101,11 @@ export function interceptAndTranslateUpstreamError(
     errorPayload?.technicalMessage ||
     `[ERROR] UnhandledUpstreamFaultException: Code 0x500 at gateway edge.\nTraceID: ${upstreamHeaders["x-upstream-trace-id"] || "trace-unknown"}`;
 
+  // Unique collision-resistant trace ID using crypto.randomUUID
   const traceId =
     upstreamHeaders["x-upstream-trace-id"] ||
     errorPayload?.traceId ||
-    `trace-${Date.now()}`;
+    generateSecureTraceId();
 
   const upstreamService =
     upstreamHeaders["x-upstream-service"] ||
@@ -58,9 +122,15 @@ export function interceptAndTranslateUpstreamError(
 
   switch (errorCode) {
     case "ERR_UNSUPPORTED_ASPECT_RATIO_IN_PROMPT": {
+      // 1. Structured metadata priority
+      // 2. Structured header fallback
+      // 3. Resilient multi-pattern regex fallback
       const invalidRatio =
+        errorPayload?.metadata?.invalidRatio ||
         upstreamHeaders["x-invalid-ratio"] ||
-        rawTechnicalMessage.match(/aspect ratio '([^']+)'/)?.[1] ||
+        upstreamHeaders["x-upstream-invalid-ratio"] ||
+        rawTechnicalMessage.match(/aspect\s+ratio\s+['"]?([^'"]+)['"]?/i)?.[1] ||
+        rawTechnicalMessage.match(/\b(\d+:\d+)\b/)?.[1] ||
         "specified";
       sanitizedMessage = `The aspect ratio '${invalidRatio}' in your prompt is not supported.`;
       category = "ASPECT_RATIO";
@@ -70,14 +140,27 @@ export function interceptAndTranslateUpstreamError(
     }
 
     case "ERR_ASPECT_RATIO_DROPDOWN_CONFLICT": {
+      // 1. Structured metadata priority (eliminates fragile regex scraping)
+      // 2. Structured header fallback
+      // 3. Resilient multi-pattern regex fallback
       const promptRatio =
+        errorPayload?.metadata?.conflictingRatio ||
+        errorPayload?.metadata?.promptRatio ||
         upstreamHeaders["x-conflicting-prompt-ratio"] ||
-        rawTechnicalMessage.match(/prompt semantic ratio constraint '([^']+)'/)?.[1] ||
+        upstreamHeaders["x-upstream-conflicting-ratio"] ||
+        rawTechnicalMessage.match(/prompt(?:\s+semantic)?\s+ratio(?:\s+constraint)?\s+['"]?([^'"]+)['"]?/i)?.[1] ||
+        rawTechnicalMessage.match(/(?:requested|prompt)\s+['"]?(\d+:\d+)['"]?/i)?.[1] ||
         "in prompt";
+
       const dropdownRatio =
+        errorPayload?.metadata?.selectedRatio ||
+        errorPayload?.metadata?.dropdownRatio ||
         upstreamHeaders["x-selected-dropdown-ratio"] ||
-        rawTechnicalMessage.match(/parameter 'x-zyka-aspect-ratio' \(([^)]+)\)/)?.[1] ||
+        upstreamHeaders["x-upstream-selected-ratio"] ||
+        rawTechnicalMessage.match(/(?:parameter|header)\s+['"]?x-zyka-aspect-ratio['"]?\s*\(?([^)\s'"]+)\)?/i)?.[1] ||
+        rawTechnicalMessage.match(/(?:selected|dropdown)\s+['"]?(\d+:\d+)['"]?/i)?.[1] ||
         "in dropdown";
+
       sanitizedMessage = `Your prompt requested ${promptRatio}, but ${dropdownRatio} is selected in the aspect ratio dropdown.`;
       category = "ASPECT_RATIO";
       actionableTip = `Update your aspect ratio dropdown to match ${promptRatio}, or remove '${promptRatio}' from your prompt to use the dropdown setting.`;
@@ -87,14 +170,27 @@ export function interceptAndTranslateUpstreamError(
     }
 
     case "ERR_DURATION_DROPDOWN_CONFLICT": {
+      // 1. Structured metadata priority (eliminates fragile regex scraping)
+      // 2. Structured header fallback
+      // 3. Resilient multi-pattern regex fallback
       const promptDuration =
+        errorPayload?.metadata?.conflictingDuration ||
+        errorPayload?.metadata?.promptDuration ||
         upstreamHeaders["x-conflicting-prompt-duration"] ||
-        rawTechnicalMessage.match(/prompt semantic duration '([^']+)'/)?.[1] ||
+        upstreamHeaders["x-upstream-conflicting-duration"] ||
+        rawTechnicalMessage.match(/prompt(?:\s+semantic)?\s+duration\s+['"]?([^'"]+)['"]?/i)?.[1] ||
+        rawTechnicalMessage.match(/(?:requested|prompt)\s+['"]?(\d+s?)['"]?/i)?.[1] ||
         "in prompt";
+
       const dropdownDuration =
+        errorPayload?.metadata?.selectedDuration ||
+        errorPayload?.metadata?.dropdownDuration ||
         upstreamHeaders["x-selected-dropdown-duration"] ||
-        rawTechnicalMessage.match(/duration header '([^']+)'/)?.[1] ||
+        upstreamHeaders["x-upstream-selected-duration"] ||
+        rawTechnicalMessage.match(/(?:ingress\s+)?duration\s+header\s+['"]?([^'"]+)['"]?/i)?.[1] ||
+        rawTechnicalMessage.match(/(?:selected|dropdown)\s+['"]?(\d+s?)['"]?/i)?.[1] ||
         "in dropdown";
+
       sanitizedMessage = `Your prompt requested ${promptDuration}, but ${dropdownDuration} is selected in the duration dropdown.`;
       category = "DURATION";
       actionableTip = `Set the duration dropdown to ${promptDuration} to match your prompt, or remove the duration from your text.`;
@@ -201,11 +297,40 @@ export function interceptAndTranslateUpstreamError(
         category = "SYSTEM";
         actionableTip =
           "Our cloud GPU workers are clearing queue backlog. Please retry shortly.";
+      } else if (upstreamStatus >= 400 && upstreamStatus < 500) {
+        // Categorize unhandled 4xx client errors as VALIDATION rather than generic SYSTEM
+        category = "VALIDATION";
+        if (upstreamStatus === 400) {
+          sanitizedMessage =
+            "Invalid request payload. Please verify your prompt and parameters.";
+          actionableTip =
+            "Ensure your prompt is properly formatted and non-empty before generating.";
+        } else if (upstreamStatus === 422) {
+          sanitizedMessage =
+            "The request could not be processed due to semantic parameter constraints.";
+          actionableTip =
+            "Adjust your generation settings or prompt to match supported model parameters.";
+        } else if (upstreamStatus === 404) {
+          sanitizedMessage =
+            "The requested AI generation resource or model was not found.";
+          actionableTip =
+            "Select a currently available AI model engine from the model dropdown.";
+        } else if (upstreamStatus === 403) {
+          sanitizedMessage =
+            "Access to the requested generation capability is restricted.";
+          actionableTip =
+            "Verify your account permissions or choose a standard generation model.";
+        } else {
+          sanitizedMessage =
+            "Client request validation failed. Please check your generation settings.";
+          actionableTip =
+            "Review your prompt text, model selection, and aspect ratio before submitting.";
+        }
       }
       break;
   }
 
-  // Sanitize all outgoing headers so none contain newlines
+  // Sanitize all outgoing headers: enforce 1000 char limit and serialize objects safely to prevent 431 crashes
   const cleanUpstreamHeaders: Record<string, string> = {};
   for (const [k, v] of Object.entries(upstreamHeaders)) {
     cleanUpstreamHeaders[k] = sanitizeHeaderValue(v);
@@ -227,6 +352,7 @@ export function interceptAndTranslateUpstreamError(
       technicalMessage: rawTechnicalMessage,
       upstreamService,
       traceId,
+      metadata: errorPayload?.metadata,
     },
     sanitizedError: {
       userMessage: sanitizedMessage,

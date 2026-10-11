@@ -9,7 +9,8 @@
     "lint": "eslint",
     "test": "node scripts/test-suite.mjs",
     "test:stress": "node scripts/stress-test.mjs",
-    "test:logs": "node scripts/test-server-logs.mjs"
+    "test:logs": "node scripts/test-server-logs.mjs",
+    "test:vulnerabilities": "node --experimental-strip-types scripts/test-vulnerabilities.mjs"
   },
   "dependencies": {
     "clsx": "^2.1.1",

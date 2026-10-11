@@ -280,14 +280,28 @@ export function recordServerError(
 
   const userAgent = getHeader("user-agent") || "unknown-client";
   const userId = resolveUserIdentifier(params.headers, ip, userAgent);
+  const secureUuid = () => {
+    try {
+      if (typeof globalThis !== "undefined" && globalThis.crypto?.randomUUID) {
+        return globalThis.crypto.randomUUID();
+      }
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const nodeCrypto = require("crypto");
+      if (nodeCrypto.randomUUID) {
+        return nodeCrypto.randomUUID();
+      }
+    } catch {}
+    return `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+  };
+
   const requestId =
     params.requestId ||
     getHeader("x-zyka-request-id") ||
-    `req-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    `req-${secureUuid()}`;
   const traceId =
     params.traceId ||
     getHeader("x-upstream-trace-id") ||
-    `trace-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    `trace-${secureUuid()}`;
 
   const promptText = (params.payload?.prompt || "").trim();
   const promptWords = promptText ? promptText.split(/\s+/).length : 0;
@@ -298,7 +312,7 @@ export function recordServerError(
   const timestamp = now.toISOString();
 
   const entry: ServerErrorLogEntry = {
-    logId: `err_${now.getTime()}_${Math.random().toString(36).substring(2, 8)}`,
+    logId: `err_${now.getTime()}_${secureUuid()}`,
     timestamp,
     epochMs: now.getTime(),
     clientIp: ip,

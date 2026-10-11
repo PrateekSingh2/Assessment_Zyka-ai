@@ -16,6 +16,7 @@ export interface UpstreamErrorDetail {
   technicalMessage: string;
   upstreamService: string;
   traceId: string;
+  metadata?: Record<string, any>;
 }
 
 export interface SanitizedErrorDetail {
