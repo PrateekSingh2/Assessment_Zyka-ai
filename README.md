@@ -169,8 +169,8 @@ Assessment_Zyka-ai/
 │   └── stress-test.mjs                  # Adversarial stress test suite (74 tests)
 ├── logs/                                # Local runtime server logs (server-errors.jsonl)
 ├── netlify.toml                         # Netlify build configuration & Next.js plugin setup
-├── .node-version                        # Node.js 20 environment specification
-├── .nvmrc                               # NVM Node.js 20 specification
+├── .node-version                        # Node.js 22 environment specification (required for pnpm 11)
+├── .nvmrc                               # NVM Node.js 22 specification (required for pnpm 11)
 ├── next.config.ts                       # Next.js configuration with proxyClientMaxBodySize & CSP
 ├── package.json
 └── README.md
@@ -229,8 +229,8 @@ pnpm start
 This repository is fully configured for automated continuous deployment to [Netlify](https://www.netlify.com/) using the Next.js App Router and the `@netlify/plugin-nextjs` runtime.
 
 ### Configuration Overview
-- **`netlify.toml`**: Pre-configures build commands, publishing directory, Node 20 runtime, pnpm flags, and global security headers.
-- **`.nvmrc` & `.node-version`**: Pins the Node.js runtime environment to version `20`.
+- **`netlify.toml`**: Pre-configures build commands, publishing directory, Node 22 runtime, pnpm flags, and global security headers.
+- **`.nvmrc` & `.node-version`**: Pins the Node.js runtime environment to version `22` (required by pnpm 11 for native `node:sqlite` module support).
 - **`@netlify/plugin-nextjs`**: Installed in `devDependencies` (v5.16+) to natively handle Next.js 16 dynamic route handlers, streaming, and edge proxies on Netlify.
 
 ### Deploying via Netlify Dashboard
