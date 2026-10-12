@@ -17,7 +17,7 @@ When non-technical creators interact with complex multi-modal generation pipelin
 
 ### Key Objectives Solved:
 1. **Enterprise Error Translation Engine**: Intercepts raw technical errors and transforms them into concise, 1-line plain English messages without leaking internal topology or stack traces.
-2. **User Retention & 1-Click Recovery**: Provides contextual retention tips with **1-click action buttons** (e.g., *"Switch to Image Generator"* or *"Sync Ratio to 9:16"*), preventing drop-off.
+2. **User Retention & Engagement-Preserving Error Handling**: The error-handling architecture is specially engineered so that user engagement on Zyka.ai is never lost. When users encounter errors (such as modal mismatches, aspect ratio conflicts, duration limits, or rate limits), rather than showing dead-end failure screens or cryptic crash codes that cause users to abandon the platform, the system provides creator-friendly plain English explanations coupled with **1-click instant recovery action buttons** (e.g., *"Switch to Image Generator"*, *"Sync Ratio to 9:16"*, or automatic rate-limit cooldown timers). This guides users directly into successful generation flows, ensuring they never leave the platform in frustration.
 3. **DevTools Network & Error Inspector**:
    - Collapsible DevTools accordion tree:
      - `▶ Response headers (N)`
@@ -168,6 +168,9 @@ Assessment_Zyka-ai/
 │   ├── test-server-logs.mjs             # Real-IP & user-wise audit suite (15 assertions)
 │   └── stress-test.mjs                  # Adversarial stress test suite (74 tests)
 ├── logs/                                # Local runtime server logs (server-errors.jsonl)
+├── netlify.toml                         # Netlify build configuration & Next.js plugin setup
+├── .node-version                        # Node.js 20 environment specification
+├── .nvmrc                               # NVM Node.js 20 specification
 ├── next.config.ts                       # Next.js configuration with proxyClientMaxBodySize & CSP
 ├── package.json
 └── README.md
@@ -218,3 +221,36 @@ pnpm dev
 pnpm build
 pnpm start
 ```
+
+---
+
+## 🌐 7. Netlify Deployment Guide
+
+This repository is fully configured for automated continuous deployment to [Netlify](https://www.netlify.com/) using the Next.js App Router and the `@netlify/plugin-nextjs` runtime.
+
+### Configuration Overview
+- **`netlify.toml`**: Pre-configures build commands, publishing directory, Node 20 runtime, pnpm flags, and global security headers.
+- **`.nvmrc` & `.node-version`**: Pins the Node.js runtime environment to version `20`.
+- **`@netlify/plugin-nextjs`**: Installed in `devDependencies` (v5.16+) to natively handle Next.js 16 dynamic route handlers, streaming, and edge proxies on Netlify.
+
+### Deploying via Netlify Dashboard
+1. **Push to GitHub**: Ensure all commits are pushed to the `main` branch of `https://github.com/PrateekSingh2/Assessment_Zyka-ai.git`.
+2. **Connect to Netlify**:
+   - Log in to your [Netlify Dashboard](https://app.netlify.com/).
+   - Click **Add new site** > **Import an existing project**.
+   - Choose **GitHub** as your Git provider and authorize Netlify.
+   - Search for and select **`Assessment_Zyka-ai`**.
+3. **Build Settings** (automatically pre-filled from `netlify.toml`):
+   - **Base directory**: `.` (or leave blank for root)
+   - **Build command**: `pnpm run build`
+   - **Publish directory**: `.next`
+   - **Package Manager**: `pnpm` (Netlify auto-detects `pnpm-lock.yaml`)
+4. **Environment Variables** (Optional):
+   - Under **Site configuration** > **Environment variables**, you can set:
+     - `NODE_ENV`: `production`
+     - `NEXT_TELEMETRY_DISABLED`: `1`
+     - `ADMIN_AUDIT_SECRET`: *(Optional custom bearer secret for querying `/api/logs`)*
+5. **Deploy**:
+   - Click **Deploy Zyka.ai**.
+   - Netlify will run `pnpm install`, install dependencies, run `next build`, and deploy the application with serverless functions for the API routes.
+
