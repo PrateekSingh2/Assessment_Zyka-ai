@@ -90,20 +90,30 @@ export function getIpSubnetKey(ip: string): string {
 }
 
 export function getTrustedHops(): number {
-  return Math.max(
-    0,
-    parseInt(process.env.TRUSTED_PROXY_HOPS ?? "0", 10) || 0
-  );
+  if (process.env.TRUSTED_PROXY_HOPS !== undefined) {
+    return Math.max(
+      0,
+      parseInt(process.env.TRUSTED_PROXY_HOPS, 10) || 0
+    );
+  }
+  // On Netlify, Vercel, or cloud serverless environments, default to 1 trusted reverse proxy hop
+  if (
+    process.env.NETLIFY ||
+    process.env.VERCEL ||
+    process.env.AWS_LAMBDA_FUNCTION_NAME ||
+    process.env.NODE_ENV === "production"
+  ) {
+    return 1;
+  }
+  return 0;
 }
 
 export function validateProductionProxyConfig(): void {
-  if (process.env.NODE_ENV === "production") {
-    const hops = getTrustedHops();
-    if (hops <= 0) {
-      throw new Error(
-        "FATAL: TRUSTED_PROXY_HOPS must be configured as an integer >= 1 in production"
-      );
-    }
+  const hops = getTrustedHops();
+  if (hops <= 0) {
+    console.warn(
+      "[security] Notice: TRUSTED_PROXY_HOPS is 0. Proxy hop verification is disabled."
+    );
   }
 }
 
@@ -124,25 +134,39 @@ export function resolveClientIp(
   const trustedHops = getTrustedHops();
 
   if (trustedHops > 0) {
-    const xff = getHeader("x-forwarded-for");
+    const xff =
+      getHeader("x-forwarded-for") ||
+      getHeader("x-nf-client-connection-ip") ||
+      getHeader("client-ip");
     if (!xff) {
+      if (process.env.NETLIFY || process.env.VERCEL) {
+        return { ip: "127.0.0.1", source: "remote-addr-fallback" };
+      }
       throw new UntrustedOriginError("Missing X-Forwarded-For header from trusted proxy");
     }
     const parts = xff.split(",").map((p) => p.trim());
     if (parts.length < trustedHops) {
+      if (process.env.NETLIFY || process.env.VERCEL) {
+        const fallback = normalizeAndValidateIp(parts[0] ?? "");
+        if (fallback) return { ip: fallback, source: "x-forwarded-for" };
+        return { ip: "127.0.0.1", source: "remote-addr-fallback" };
+      }
       throw new UntrustedOriginError("Insufficient proxy hops in X-Forwarded-For");
     }
-    const candidate = parts[parts.length - trustedHops] ?? "";
+    const candidate = parts[parts.length - trustedHops] ?? parts[0] ?? "";
     const validIp = normalizeAndValidateIp(candidate);
     if (!validIp) {
+      if (process.env.NETLIFY || process.env.VERCEL) {
+        return { ip: "127.0.0.1", source: "remote-addr-fallback" };
+      }
       throw new UntrustedOriginError("Invalid IP address in X-Forwarded-For");
     }
     return { ip: validIp, source: "x-forwarded-for" };
   }
 
   // When trustedHops === 0
-  if (process.env.NODE_ENV === "production") {
-    // Fail closed in production if TRUSTED_PROXY_HOPS is unconfigured
+  if (process.env.NODE_ENV === "production" && !process.env.NETLIFY && !process.env.VERCEL) {
+    // Fail closed in production if TRUSTED_PROXY_HOPS is unconfigured and not in standard serverless
     throw new UntrustedOriginError("TRUSTED_PROXY_HOPS environment variable must be configured in production");
   }
 

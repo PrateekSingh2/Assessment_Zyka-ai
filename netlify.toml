@@ -6,6 +6,11 @@
   NODE_VERSION = "22"
   PNPM_FLAGS = "--no-frozen-lockfile"
   NEXT_TELEMETRY_DISABLED = "1"
+  TRUSTED_PROXY_HOPS = "1"
+
+[environment]
+  NODE_VERSION = "22"
+  TRUSTED_PROXY_HOPS = "1"
 
 [[plugins]]
   package = "@netlify/plugin-nextjs"
